@@ -27,6 +27,7 @@ import {
   ACTIVITY_ACTIONS,
   ENTITY_TYPES,
   PRIORITY_ORDER,
+  FOLLOW_UP_STATUSES,
 } from '../constants/index.js';
 import { logActivity } from '../services/auditService.js';
 import {
@@ -461,6 +462,28 @@ export const updateLead = asyncHandler(async (req, res) => {
   }
   if (updateData.customFields || updateData.course !== undefined || updateData.leadDate !== undefined) {
     updateData.leadDate = resolveLeadDate({ ...lead.toObject(), ...updateData }) || lead.leadDate || lead.createdAt;
+  }
+
+  const clearingFollowUp =
+    Object.prototype.hasOwnProperty.call(updateData, 'nextFollowUpDate')
+    && (updateData.nextFollowUpDate === null || updateData.nextFollowUpDate === '');
+
+  if (clearingFollowUp) {
+    updateData.nextFollowUpDate = null;
+    await FollowUp.updateMany(
+      {
+        lead: lead._id,
+        status: { $in: [FOLLOW_UP_STATUSES.SCHEDULED, FOLLOW_UP_STATUSES.OVERDUE] },
+      },
+      {
+        $set: {
+          status: FOLLOW_UP_STATUSES.CANCELLED,
+          completionNotes: 'Next follow-up cancelled',
+          completedAt: new Date(),
+          completedBy: req.user._id,
+        },
+      }
+    );
   }
 
   Object.assign(lead, updateData);
