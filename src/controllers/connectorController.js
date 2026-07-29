@@ -617,16 +617,37 @@ export const getSyncProgress = asyncHandler(async (req, res) => {
   const accessibleIds = await Connector.find(connectorFilter).select('_id');
   const ids = accessibleIds.map((c) => c._id);
 
-  // Checkpoint: fail stalled / abandoned jobs (e.g. Redis restart mid-sync)
-  const staleBefore = new Date(Date.now() - 20 * 60 * 1000);
+  // Checkpoint: fail abandoned jobs so the live dock doesn't keep ghosts.
+  // Pending/queued never leave "waiting for worker" on Vercel without workers —
+  // fail those quickly (2 min). Running jobs get a longer stall window.
+  const queuedStaleBefore = new Date(Date.now() - 2 * 60 * 1000);
+  const runningStaleBefore = new Date(Date.now() - 20 * 60 * 1000);
   const maxAgeBefore = new Date(Date.now() - 60 * 60 * 1000);
+
   await ConnectorSyncLog.updateMany(
     {
       connector: { $in: ids },
       mode: { $ne: 'preview' },
-      status: { $in: ['pending', 'running'] },
+      status: 'pending',
+      createdAt: { $lt: queuedStaleBefore },
+    },
+    {
+      $set: {
+        status: 'failed',
+        phase: 'done',
+        completedAt: new Date(),
+        errorSummary: 'Sync never started (queue abandoned). Please try again.',
+      },
+    }
+  );
+
+  await ConnectorSyncLog.updateMany(
+    {
+      connector: { $in: ids },
+      mode: { $ne: 'preview' },
+      status: 'running',
       $or: [
-        { updatedAt: { $lt: staleBefore } },
+        { updatedAt: { $lt: runningStaleBefore } },
         { createdAt: { $lt: maxAgeBefore } },
       ],
     },
