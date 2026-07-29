@@ -115,6 +115,40 @@ export function buildCourseMatchFilter(courseFilter) {
   };
 }
 
+/** True when a stored lead.course value belongs to a catalog course name. */
+export function leadCourseMatchesCatalog(leadCourse, catalogName) {
+  if (leadCourse == null || catalogName == null) return false;
+  const leadRaw = String(leadCourse).trim();
+  const catalog = String(catalogName).trim();
+  if (!leadRaw || !catalog) return false;
+
+  const leadLabel = normalizeCourseValue(leadRaw) || leadRaw;
+  const catalogLabel = normalizeCourseValue(catalog) || catalog;
+  if (leadLabel.toLowerCase() === catalogLabel.toLowerCase()) return true;
+
+  const catalogSlug = courseToSlug(catalogLabel);
+  if (!catalogSlug) return false;
+  if (courseToSlug(leadLabel) === catalogSlug) return true;
+  if (courseToSlug(leadRaw) === catalogSlug) return true;
+
+  const slugRe = new RegExp(
+    `(^|[/])${escapeRegexLocal(catalogSlug)}([/.?#]|$)`,
+    'i'
+  );
+  if (slugRe.test(leadRaw)) return true;
+
+  const slugUnderscore = catalogSlug.replace(/-/g, '_');
+  if (slugUnderscore !== catalogSlug) {
+    const underRe = new RegExp(
+      `(^|[/])${escapeRegexLocal(slugUnderscore)}([/.?#]|$)`,
+      'i'
+    );
+    if (underRe.test(leadRaw)) return true;
+  }
+
+  return false;
+}
+
 /** Sanitize a sheet header into a stable custom field key. */
 export function sanitizeCustomFieldKey(input) {
   if (!input || typeof input !== 'string') return '';

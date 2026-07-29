@@ -2,6 +2,7 @@ import { AppError, asyncHandler, successResponse } from '../utils/apiResponse.js
 import { Course, Lead } from '../models/index.js';
 import { ACTIVITY_ACTIONS, ENTITY_TYPES } from '../constants/index.js';
 import { logActivity } from '../services/auditService.js';
+import { buildCourseMatchFilter, leadCourseMatchesCatalog } from '../utils/customFields.js';
 
 const slugCode = (name) =>
   name
@@ -9,6 +10,12 @@ const slugCode = (name) =>
     .replace(/[^A-Z0-9]+/g, '_')
     .replace(/^_|_$/g, '')
     .slice(0, 40);
+
+const countLeadsForCourseName = async (courseName) => {
+  const courseClause = buildCourseMatchFilter(courseName);
+  if (!courseClause) return 0;
+  return Lead.countDocuments({ isDeleted: false, ...courseClause });
+};
 
 export const createCourse = asyncHandler(async (req, res) => {
   const { name, code, category, description, sortOrder } = req.body;
@@ -49,17 +56,21 @@ export const getCourses = asyncHandler(async (req, res) => {
 
   const courses = await Course.find(filter).sort({ sortOrder: 1, name: 1 }).lean();
 
-  const names = courses.map((c) => c.name);
+  // One aggregation, then match catalog names against name / slug / URL values
   const leadCounts = await Lead.aggregate([
-    { $match: { course: { $in: names }, isDeleted: false } },
+    { $match: { isDeleted: false, course: { $exists: true, $nin: [null, ''] } } },
     { $group: { _id: '$course', count: { $sum: 1 } } },
   ]);
-  const leadMap = Object.fromEntries(leadCounts.map((r) => [r._id, r.count]));
 
-  const enriched = courses.map((c) => ({
-    ...c,
-    totalLeads: leadMap[c.name] || 0,
-  }));
+  const enriched = courses.map((c) => {
+    let totalLeads = 0;
+    for (const row of leadCounts) {
+      if (leadCourseMatchesCatalog(row._id, c.name)) {
+        totalLeads += row.count;
+      }
+    }
+    return { ...c, totalLeads };
+  });
 
   successResponse(res, enriched);
 });
@@ -68,7 +79,7 @@ export const getCourseById = asyncHandler(async (req, res) => {
   const course = await Course.findById(req.params.id);
   if (!course || course.deletedAt) throw new AppError('Course not found', 404);
 
-  const totalLeads = await Lead.countDocuments({ course: course.name, isDeleted: false });
+  const totalLeads = await countLeadsForCourseName(course.name);
   successResponse(res, { ...course.toObject(), totalLeads });
 });
 
@@ -95,10 +106,13 @@ export const updateCourse = asyncHandler(async (req, res) => {
     const oldName = course.name;
     course.name = name.trim();
     if (oldName !== course.name) {
-      await Lead.updateMany(
-        { course: oldName, isDeleted: false },
-        { $set: { course: course.name } }
-      );
+      const courseClause = buildCourseMatchFilter(oldName);
+      if (courseClause) {
+        await Lead.updateMany(
+          { isDeleted: false, ...courseClause },
+          { $set: { course: course.name } }
+        );
+      }
     }
   }
   if (category !== undefined) course.category = category?.trim() || undefined;
@@ -147,7 +161,7 @@ export const deleteCourse = asyncHandler(async (req, res) => {
   const course = await Course.findById(req.params.id);
   if (!course || course.deletedAt) throw new AppError('Course not found', 404);
 
-  const totalLeads = await Lead.countDocuments({ course: course.name, isDeleted: false });
+  const totalLeads = await countLeadsForCourseName(course.name);
   if (totalLeads > 0) {
     course.isActive = false;
     await course.save();

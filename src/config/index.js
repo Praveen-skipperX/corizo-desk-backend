@@ -18,11 +18,19 @@ const config = {
     from: process.env.EMAIL_FROM || 'noreply@corizo.in',
   },
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:5173',
-  /** Comma-separated allowlist for CORS (defaults to FRONTEND_URL). */
-  frontendOrigins: (process.env.FRONTEND_URLS || process.env.FRONTEND_URL || 'http://localhost:5173')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean),
+  /** Comma-separated allowlist for CORS (defaults to FRONTEND_URL + desk.corizo.in). */
+  frontendOrigins: [
+    ...new Set(
+      [
+        ...(process.env.FRONTEND_URLS || process.env.FRONTEND_URL || 'http://localhost:5173')
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
+        'https://desk.corizo.in',
+        'http://localhost:5173',
+      ]
+    ),
+  ],
   otp: {
     expirySeconds: parseInt(process.env.OTP_EXPIRY_SECONDS, 10) || 300,
     maxAttempts: parseInt(process.env.OTP_MAX_ATTEMPTS, 10) || 3,

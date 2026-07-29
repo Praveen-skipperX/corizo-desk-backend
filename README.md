@@ -2,23 +2,31 @@
 
 Express API for Corizo Desk (MongoDB, Redis, BullMQ).
 
-> **Note:** This API is **not** intended for Vercel serverless. Deploy on Render, Railway, Fly.io, or a VPS. Connect the **frontend** repo to Vercel.
+## Vercel deploy (API)
 
-## Production checklist (for Vercel frontend)
+This repo can run as a Vercel serverless function via `api/index.js`.
 
-Set these on your API host:
+### Required environment variables on Vercel
 
 | Variable | Example |
 |----------|---------|
 | `NODE_ENV` | `production` |
-| `FRONTEND_URL` | `https://your-app.vercel.app` |
-| `FRONTEND_URLS` | Optional comma-separated preview URLs |
 | `MONGODB_URI` | Atlas connection string |
-| `REDIS_URL` | Redis / Upstash URL |
-| `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET` | Strong secrets |
+| `REDIS_URL` | Upstash / Redis Cloud URL (`rediss://…`) |
+| `JWT_ACCESS_SECRET` | Strong secret |
+| `JWT_REFRESH_SECRET` | Strong secret |
+| `FRONTEND_URL` | `https://desk.corizo.in` |
+| `FRONTEND_URLS` | Optional extra origins (comma-separated) |
 | `RESEND_API_KEY` | Email delivery |
+| `GOOGLE_SERVICE_ACCOUNT_EMAIL` | Sheets connector |
+| `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY` | Sheets connector (use `\n` for newlines) |
 
-In production, refresh cookies use `SameSite=None; Secure` so the Vercel SPA can keep sessions across domains.
+`https://desk.corizo.in` is always allowed for CORS.
+
+### Notes
+
+- Sheet sync workers (BullMQ) do **not** run on Vercel serverless. For reliable background sync, also run `npm run worker` on a always-on host, or move the API to Render/Railway.
+- Frontend must set `VITE_API_URL=https://corizo-desk-backend.vercel.app/api` and redeploy.
 
 ## Local
 

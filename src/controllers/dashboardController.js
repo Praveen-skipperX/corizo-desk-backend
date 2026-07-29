@@ -2,17 +2,16 @@ import { asyncHandler, successResponse, paginatedResponse } from '../utils/apiRe
 import { buildPagination, parseSort } from '../utils/helpers.js';
 import {
   Lead,
-  DealClosure,
-  FollowUp,
   ActivityLog,
   User,
 } from '../models/index.js';
-import { ROLES, LEAD_STATUSES, FOLLOW_UP_STATUSES, ACTIVITY_ACTIONS } from '../constants/index.js';
+import { ROLES, LEAD_STATUSES, ACTIVITY_ACTIONS } from '../constants/index.js';
 import {
   getCachedDashboardStats,
   cacheDashboardStats,
 } from '../services/redisService.js';
 import { buildLeadScopeFilter } from '../utils/leadAccess.js';
+import { normalizeCourseValue } from '../utils/customFields.js';
 
 const OPEN_STATUSES = [
   LEAD_STATUSES.NEW,
@@ -29,6 +28,21 @@ const CLOSED_STATUSES = [
   LEAD_STATUSES.DUPLICATE,
   LEAD_STATUSES.SPAM,
 ];
+
+/** Sheet date (leadDate) when present, otherwise createdAt — for dashboard date stats. */
+const STATS_DATE_EXPR = { $ifNull: ['$leadDate', '$createdAt'] };
+
+const mergeCourseCounts = (rows = []) => {
+  const merged = new Map();
+  for (const row of rows) {
+    const label = normalizeCourseValue(row._id) || row._id || 'Unknown';
+    merged.set(label, (merged.get(label) || 0) + row.count);
+  }
+  return [...merged.entries()]
+    .map(([name, value]) => ({ name, value }))
+    .sort((a, b) => b.value - a.value)
+    .slice(0, 12);
+};
 
 const formatActivityDescription = (activity) => {
   const name = activity.userName || activity.user?.name || 'Someone';
@@ -94,15 +108,12 @@ export const getDashboard = asyncHandler(async (req, res) => {
 
   const leadFilter = { isDeleted: false, ...buildLeadScopeFilter(req.user) };
   let activityFilter = {};
-  let dealFilter = { status: 'active' };
 
   if (req.user.role === ROLES.ADMIN) {
     const deptId = req.user.department._id || req.user.department;
     activityFilter.department = deptId;
-    dealFilter.department = deptId;
   } else if (req.user.role === ROLES.EMPLOYEE) {
     activityFilter.user = req.user._id;
-    dealFilter.closedBy = req.user._id;
   }
 
   const todayStart = new Date();
@@ -110,7 +121,22 @@ export const getDashboard = asyncHandler(async (req, res) => {
   const todayEnd = new Date();
   todayEnd.setHours(23, 59, 59, 999);
 
+  const weekStart = new Date(todayStart);
+  weekStart.setDate(weekStart.getDate() - 6);
+
+  const trendStart = new Date(todayStart);
+  trendStart.setDate(trendStart.getDate() - 13);
+
   const closedStatusFilter = { $nin: CLOSED_STATUSES };
+
+  const statsDateInRange = (from, to) => ({
+    $expr: {
+      $and: [
+        { $gte: [STATS_DATE_EXPR, from] },
+        { $lte: [STATS_DATE_EXPR, to] },
+      ],
+    },
+  });
 
   const [
     totalLeads,
@@ -120,18 +146,18 @@ export const getDashboard = asyncHandler(async (req, res) => {
     statusDistribution,
     priorityDistribution,
     departmentDistribution,
-    totalRevenue,
-    revenueByDepartment,
-    revenueByEmployee,
-    monthlyRevenue,
     todayFollowUps,
     overdueFollowUps,
     lockedAccounts,
     recentActivitiesRaw,
-    employeePerformance,
     todaysLeads,
+    weekLeads,
+    weekEnrollments,
     sourceDistribution,
-    courseDistribution,
+    courseInterest,
+    courseEnrollments,
+    leadsByDayRaw,
+    enrollmentsByDayRaw,
   ] = await Promise.all([
     Lead.countDocuments(leadFilter),
     Lead.countDocuments({ ...leadFilter, status: { $in: OPEN_STATUSES } }),
@@ -154,42 +180,6 @@ export const getDashboard = asyncHandler(async (req, res) => {
           { $project: { name: '$dept.name', count: 1 } },
         ])
       : Promise.resolve([]),
-    Lead.aggregate([
-      { $match: { ...leadFilter, status: LEAD_STATUSES.CLOSED, 'dealClosure.amount': { $exists: true, $ne: null } } },
-      { $group: { _id: null, total: { $sum: '$dealClosure.amount' } } },
-    ]),
-    req.user.role !== ROLES.EMPLOYEE
-      ? DealClosure.aggregate([
-          { $match: dealFilter },
-          { $group: { _id: '$department', total: { $sum: '$amount' }, count: { $sum: 1 } } },
-          { $lookup: { from: 'departments', localField: '_id', foreignField: '_id', as: 'dept' } },
-          { $unwind: '$dept' },
-          { $project: { name: '$dept.name', total: 1, count: 1 } },
-        ])
-      : Promise.resolve([]),
-    req.user.role !== ROLES.EMPLOYEE
-      ? DealClosure.aggregate([
-          { $match: dealFilter },
-          { $group: { _id: '$closedBy', total: { $sum: '$amount' }, count: { $sum: 1 } } },
-          { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'user' } },
-          { $unwind: '$user' },
-          { $project: { name: '$user.name', total: 1, count: 1 } },
-          { $sort: { total: -1 } },
-          { $limit: 10 },
-        ])
-      : Promise.resolve([]),
-    DealClosure.aggregate([
-      { $match: dealFilter },
-      {
-        $group: {
-          _id: { year: { $year: '$closureDate' }, month: { $month: '$closureDate' } },
-          total: { $sum: '$amount' },
-          count: { $sum: 1 },
-        },
-      },
-      { $sort: { '_id.year': 1, '_id.month': 1 } },
-      { $limit: 12 },
-    ]),
     Lead.countDocuments({
       ...leadFilter,
       nextFollowUpDate: { $gte: todayStart, $lte: todayEnd },
@@ -206,27 +196,72 @@ export const getDashboard = asyncHandler(async (req, res) => {
       .limit(5)
       .populate('user', 'name email')
       .populate('department', 'name'),
-    req.user.role !== ROLES.EMPLOYEE
-      ? Lead.aggregate([
-          { $match: leadFilter },
-          { $group: { _id: '$assignedTo', total: { $sum: 1 }, won: { $sum: { $cond: [{ $eq: ['$status', LEAD_STATUSES.CLOSED] }, 1, 0] } } } },
-          { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'user' } },
-          { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
-          { $project: { name: { $ifNull: ['$user.name', 'Unassigned'] }, total: 1, won: 1 } },
-          { $sort: { total: -1 } },
-          { $limit: 10 },
-        ])
-      : Promise.resolve([]),
-    Lead.countDocuments({ ...leadFilter, createdAt: { $gte: todayStart, $lte: todayEnd } }),
+    // Date cards / trends use sheet leadDate (fallback createdAt)
+    Lead.countDocuments({ ...leadFilter, ...statsDateInRange(todayStart, todayEnd) }),
+    Lead.countDocuments({ ...leadFilter, ...statsDateInRange(weekStart, todayEnd) }),
+    Lead.countDocuments({
+      ...leadFilter,
+      status: LEAD_STATUSES.CLOSED,
+      ...statsDateInRange(weekStart, todayEnd),
+    }),
     Lead.aggregate([
       { $match: leadFilter },
       { $group: { _id: '$source', count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
     ]),
     Lead.aggregate([
       { $match: { ...leadFilter, course: { $exists: true, $nin: [null, ''] } } },
       { $group: { _id: '$course', count: { $sum: 1 } } },
       { $sort: { count: -1 } },
-      { $limit: 12 },
+    ]),
+    Lead.aggregate([
+      {
+        $match: {
+          ...leadFilter,
+          status: LEAD_STATUSES.CLOSED,
+          course: { $exists: true, $nin: [null, ''] },
+        },
+      },
+      { $group: { _id: '$course', count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+    ]),
+    Lead.aggregate([
+      { $match: { ...leadFilter, ...statsDateInRange(trendStart, todayEnd) } },
+      {
+        $group: {
+          _id: {
+            $dateToString: {
+              format: '%Y-%m-%d',
+              date: STATS_DATE_EXPR,
+              timezone: 'Asia/Kolkata',
+            },
+          },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]),
+    Lead.aggregate([
+      {
+        $match: {
+          ...leadFilter,
+          status: LEAD_STATUSES.CLOSED,
+          ...statsDateInRange(trendStart, todayEnd),
+        },
+      },
+      {
+        $group: {
+          _id: {
+            $dateToString: {
+              format: '%Y-%m-%d',
+              date: STATS_DATE_EXPR,
+              timezone: 'Asia/Kolkata',
+            },
+          },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { _id: 1 } },
     ]),
   ]);
 
@@ -234,6 +269,22 @@ export const getDashboard = asyncHandler(async (req, res) => {
   const conversionRate = totalLeads > 0
     ? ((closedWon / totalLeads) * 100).toFixed(1)
     : 0;
+
+  const leadsByDayMap = new Map(leadsByDayRaw.map((r) => [r._id, r.count]));
+  const enrollmentsByDayMap = new Map(enrollmentsByDayRaw.map((r) => [r._id, r.count]));
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const leadsTrend = [];
+  for (let i = 13; i >= 0; i -= 1) {
+    const d = new Date(todayStart);
+    d.setDate(d.getDate() - i);
+    const key = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    leadsTrend.push({
+      date: key,
+      name: d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }),
+      leads: leadsByDayMap.get(key) || 0,
+      enrollments: enrollmentsByDayMap.get(key) || 0,
+    });
+  }
 
   const recentActivities = recentActivitiesRaw.map((a) => ({
     ...(a.toObject ? a.toObject() : a),
@@ -244,13 +295,14 @@ export const getDashboard = asyncHandler(async (req, res) => {
     summary: {
       totalLeads,
       todaysLeads,
+      weekLeads,
+      weekEnrollments,
       openLeads,
       closedLeads,
       closedWon,
       closedLost,
       notInterested: closedLost,
       pendingFollowUps: todayFollowUps + overdueFollowUps,
-      totalRevenue: totalRevenue[0]?.total || 0,
       conversionRate: parseFloat(conversionRate),
       todayFollowUps,
       overdueFollowUps,
@@ -258,18 +310,12 @@ export const getDashboard = asyncHandler(async (req, res) => {
     },
     charts: {
       statusDistribution: statusDistribution.map((s) => ({ name: s._id, value: s.count })),
-      priorityDistribution: priorityDistribution.map((p) => ({ name: p._id, value: p.count })),
+      priorityDistribution: priorityDistribution.map((p) => ({ name: p._id || 'unset', value: p.count })),
       sourceDistribution: sourceDistribution.map((s) => ({ name: s._id || 'unknown', value: s.count })),
-      courseDistribution: courseDistribution.map((c) => ({ name: c._id, value: c.count })),
+      courseDistribution: mergeCourseCounts(courseInterest),
+      courseEnrollments: mergeCourseCounts(courseEnrollments),
+      leadsTrend,
       departmentDistribution,
-      revenueByDepartment,
-      revenueByEmployee,
-      monthlyRevenue: monthlyRevenue.map((m) => ({
-        name: `${m._id.month}/${m._id.year}`,
-        revenue: m.total,
-        deals: m.count,
-      })),
-      employeePerformance,
     },
     recentActivities,
   };
