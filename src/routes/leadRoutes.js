@@ -40,12 +40,28 @@ import {
 } from '../validators/schemas.js';
 import { ROLES } from '../constants/index.js';
 
-// Vercel serverless FS is read-only except /tmp
-const uploadDir = process.env.VERCEL ? path.join('/tmp', 'uploads') : 'uploads';
-fs.mkdirSync(uploadDir, { recursive: true });
+// Vercel/Lambda FS is read-only except /tmp — never mkdir under /var/task
+const uploadDir =
+  process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME
+    ? path.join('/tmp', 'corizo-uploads')
+    : path.resolve('uploads');
+
+try {
+  fs.mkdirSync(uploadDir, { recursive: true });
+} catch {
+  /* ignore */
+}
 
 const storage = multer.diskStorage({
-  destination: uploadDir,
+  // Use a function so multer does not mkdirp.sync() a relative "uploads/" at import time
+  destination: (_req, _file, cb) => {
+    try {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    } catch {
+      /* ignore */
+    }
+    cb(null, uploadDir);
+  },
   filename: (_req, file, cb) => {
     cb(null, `${uuidv4()}${path.extname(file.originalname)}`);
   },
