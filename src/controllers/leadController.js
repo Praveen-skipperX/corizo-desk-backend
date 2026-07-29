@@ -40,12 +40,18 @@ import { assertLeadAccess, mergeLeadScope } from '../utils/leadAccess.js';
 import { addEmailJob, addImportJob } from '../queues/index.js';
 import { normalizeCourseValue, buildCourseMatchFilter } from '../utils/customFields.js';
 import { dayBoundsFromInput, resolveLeadDate } from '../utils/leadDate.js';
+import { getFollowUpDayWindows } from '../utils/dateUtils.js';
 import { isAdminRemarksEnabled } from '../services/appSettingsService.js';
 import ExcelJS from 'exceljs';
 import path from 'path';
 import fs from 'fs/promises';
 
-const CLOSED_STATUSES = [LEAD_STATUSES.CLOSED, LEAD_STATUSES.NOT_INTERESTED, LEAD_STATUSES.SPAM];
+const CLOSED_STATUSES = [
+  LEAD_STATUSES.CLOSED,
+  LEAD_STATUSES.NOT_INTERESTED,
+  LEAD_STATUSES.DUPLICATE,
+  LEAD_STATUSES.SPAM,
+];
 
 const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -863,18 +869,14 @@ export const createWebsiteLead = asyncHandler(async (req, res) => {
 });
 
 export const getFollowUpDashboard = asyncHandler(async (req, res) => {
-  const now = new Date();
-  const todayStart = new Date(now);
-  todayStart.setHours(0, 0, 0, 0);
-  const todayEnd = new Date(now);
-  todayEnd.setHours(23, 59, 59, 999);
-  const tomorrowStart = new Date(todayEnd);
-  tomorrowStart.setDate(tomorrowStart.getDate() + 1);
-  tomorrowStart.setHours(0, 0, 0, 0);
-  const tomorrowEnd = new Date(tomorrowStart);
-  tomorrowEnd.setHours(23, 59, 59, 999);
+  const { todayStart, todayEnd, tomorrowStart, tomorrowEnd } = getFollowUpDayWindows();
 
-  const baseFilter = { isDeleted: false, nextFollowUpDate: { $exists: true, $ne: null }, ...req.leadFilter };
+  const baseFilter = {
+    isDeleted: false,
+    nextFollowUpDate: { $exists: true, $ne: null },
+    status: { $nin: CLOSED_STATUSES },
+    ...req.leadFilter,
+  };
 
   const sortByPriorityAndTime = (items) =>
     items.sort((a, b) => {
@@ -889,7 +891,6 @@ export const getFollowUpDashboard = asyncHandler(async (req, res) => {
     populateLead(Lead.find({
       ...baseFilter,
       nextFollowUpDate: { $lt: todayStart },
-      status: { $nin: CLOSED_STATUSES },
     })),
   ]);
 
@@ -954,6 +955,7 @@ export const scheduleLeadFollowUp = asyncHandler(async (req, res) => {
   lead.lastActivityAt = new Date();
   await lead.save();
   await invalidateLeadCache(lead._id.toString());
+  await invalidateAllDashboardCaches();
 
   await logActivity({
     user: req.user,

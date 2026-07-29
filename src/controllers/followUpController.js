@@ -3,8 +3,9 @@ import { buildPagination, parseSort } from '../utils/helpers.js';
 import { FollowUp, Lead } from '../models/index.js';
 import { ROLES, FOLLOW_UP_STATUSES, ACTIVITY_ACTIONS, ENTITY_TYPES, LEAD_STATUSES, PRIORITY_ORDER } from '../constants/index.js';
 import { logActivity } from '../services/auditService.js';
-import { invalidateLeadCache } from '../services/redisService.js';
+import { invalidateLeadCache, invalidateAllDashboardCaches } from '../services/redisService.js';
 import { assertLeadAccess, getAccessibleLeadIds } from '../utils/leadAccess.js';
+import { getFollowUpDayWindows } from '../utils/dateUtils.js';
 
 const buildFollowUpFilter = async (user, baseFilter = {}) => {
   if (user.role === ROLES.SUPER_ADMIN) {
@@ -46,6 +47,7 @@ export const createFollowUp = asyncHandler(async (req, res) => {
   lead.lastActivityAt = new Date();
   await lead.save();
   await invalidateLeadCache(lead._id.toString());
+  await invalidateAllDashboardCaches();
 
   await logActivity({
     user: req.user,
@@ -111,6 +113,7 @@ export const completeFollowUp = asyncHandler(async (req, res) => {
     await followUp.lead.save();
     await invalidateLeadCache(followUp.lead._id.toString());
   }
+  await invalidateAllDashboardCaches();
 
   await logActivity({
     user: req.user,
@@ -163,6 +166,7 @@ export const addFollowUpDiscussion = asyncHandler(async (req, res) => {
     await followUp.lead.save();
     await invalidateLeadCache(followUp.lead._id.toString());
   }
+  await invalidateAllDashboardCaches();
 
   await logActivity({
     user: req.user,
@@ -180,11 +184,7 @@ export const addFollowUpDiscussion = asyncHandler(async (req, res) => {
 });
 
 export const getFollowUpSummary = asyncHandler(async (req, res) => {
-  const now = new Date();
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
-  const todayEnd = new Date();
-  todayEnd.setHours(23, 59, 59, 999);
+  const { todayStart, todayEnd } = getFollowUpDayWindows();
 
   const filter = await buildFollowUpFilter(req.user, {
     status: { $in: [FOLLOW_UP_STATUSES.SCHEDULED, FOLLOW_UP_STATUSES.OVERDUE] },

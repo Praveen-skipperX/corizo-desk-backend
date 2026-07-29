@@ -12,6 +12,7 @@ import {
 } from '../services/redisService.js';
 import { buildLeadScopeFilter } from '../utils/leadAccess.js';
 import { normalizeCourseValue } from '../utils/customFields.js';
+import { getFollowUpDayWindows } from '../utils/dateUtils.js';
 
 const OPEN_STATUSES = [
   LEAD_STATUSES.NEW,
@@ -116,18 +117,16 @@ export const getDashboard = asyncHandler(async (req, res) => {
     activityFilter.user = req.user._id;
   }
 
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
-  const todayEnd = new Date();
-  todayEnd.setHours(23, 59, 59, 999);
+  const { todayStart, todayEnd } = getFollowUpDayWindows();
 
   const weekStart = new Date(todayStart);
-  weekStart.setDate(weekStart.getDate() - 6);
+  weekStart.setTime(weekStart.getTime() - 6 * 24 * 60 * 60 * 1000);
 
   const trendStart = new Date(todayStart);
-  trendStart.setDate(trendStart.getDate() - 13);
+  trendStart.setTime(trendStart.getTime() - 13 * 24 * 60 * 60 * 1000);
 
-  const closedStatusFilter = { $nin: CLOSED_STATUSES };
+  // Match follow-up list: overdue ignores closed leads; today counts open pipeline only.
+  const openFollowUpStatus = { $nin: CLOSED_STATUSES };
 
   const statsDateInRange = (from, to) => ({
     $expr: {
@@ -137,6 +136,12 @@ export const getDashboard = asyncHandler(async (req, res) => {
       ],
     },
   });
+
+  const followUpBase = {
+    ...leadFilter,
+    nextFollowUpDate: { $exists: true, $ne: null },
+    status: openFollowUpStatus,
+  };
 
   const [
     totalLeads,
@@ -181,14 +186,12 @@ export const getDashboard = asyncHandler(async (req, res) => {
         ])
       : Promise.resolve([]),
     Lead.countDocuments({
-      ...leadFilter,
+      ...followUpBase,
       nextFollowUpDate: { $gte: todayStart, $lte: todayEnd },
-      status: closedStatusFilter,
     }),
     Lead.countDocuments({
-      ...leadFilter,
-      nextFollowUpDate: { $lt: todayStart, $exists: true, $ne: null },
-      status: closedStatusFilter,
+      ...followUpBase,
+      nextFollowUpDate: { $lt: todayStart },
     }),
     req.user.role === ROLES.SUPER_ADMIN ? User.countDocuments({ isLocked: true }) : Promise.resolve(0),
     ActivityLog.find(activityFilter)
@@ -320,7 +323,7 @@ export const getDashboard = asyncHandler(async (req, res) => {
     recentActivities,
   };
 
-  await cacheDashboardStats(scope, scopeId, dashboard);
+  await cacheDashboardStats(scope, scopeId, dashboard, 60);
   successResponse(res, dashboard);
 });
 
