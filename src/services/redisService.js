@@ -1,7 +1,9 @@
 import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
 import config from '../config/index.js';
-import { getRedisClient, REDIS_KEYS } from '../config/redis.js';
+import { getRedisClient, REDIS_KEYS, hasHostedRedis, isUsingMemoryRedis } from '../config/redis.js';
+import AppCache from '../models/AppCache.js';
+import logger from '../utils/logger.js';
 import AuthSession from '../models/AuthSession.js';
 import AuthRefreshToken from '../models/AuthRefreshToken.js';
 
@@ -281,18 +283,57 @@ export const clearPasswordVerified = async (email) => {
 
 export const cacheDashboardStats = async (scope, id, data, ttl = 300) => {
   const redis = getRedisClient();
-  await redis.setex(REDIS_KEYS.dashboardStats(scope, id), ttl, JSON.stringify(data));
+  const key = REDIS_KEYS.dashboardStats(scope, id);
+  const payload = JSON.stringify(data);
+  await redis.setex(key, ttl, payload);
+
+  // Serverless memory Redis is per-instance — also persist in Mongo so other
+  // cold starts can serve the cached dashboard without recomputing.
+  if (!hasHostedRedis()) {
+    try {
+      await AppCache.findOneAndUpdate(
+        { key },
+        { key, value: data, expiresAt: new Date(Date.now() + ttl * 1000) },
+        { upsert: true }
+      );
+    } catch (err) {
+      logger.warn('Mongo dashboard cache write failed:', err.message || err);
+    }
+  }
 };
 
 export const getCachedDashboardStats = async (scope, id) => {
   const redis = getRedisClient();
-  const data = await redis.get(REDIS_KEYS.dashboardStats(scope, id));
-  return data ? JSON.parse(data) : null;
+  const key = REDIS_KEYS.dashboardStats(scope, id);
+  const data = await redis.get(key);
+  if (data) return JSON.parse(data);
+
+  if (!hasHostedRedis()) {
+    try {
+      const doc = await AppCache.findOne({ key, expiresAt: { $gt: new Date() } }).lean();
+      if (doc?.value) {
+        const ttlSec = Math.max(1, Math.floor((new Date(doc.expiresAt) - Date.now()) / 1000));
+        await redis.setex(key, ttlSec, JSON.stringify(doc.value));
+        return doc.value;
+      }
+    } catch (err) {
+      logger.warn('Mongo dashboard cache read failed:', err.message || err);
+    }
+  }
+  return null;
 };
 
 export const invalidateDashboardCache = async (scope, id) => {
   const redis = getRedisClient();
-  await redis.del(REDIS_KEYS.dashboardStats(scope, id));
+  const key = REDIS_KEYS.dashboardStats(scope, id);
+  await redis.del(key);
+  if (!hasHostedRedis()) {
+    try {
+      await AppCache.deleteOne({ key });
+    } catch {
+      /* ignore */
+    }
+  }
 };
 
 /** Clear all role/scope dashboard snapshots (lead deletes, imports, etc.). */
@@ -300,20 +341,69 @@ export const invalidateAllDashboardCaches = async () => {
   const redis = getRedisClient();
   const keys = await redis.keys('dashboard:*');
   if (keys.length) await redis.del(...keys);
+  if (!hasHostedRedis()) {
+    try {
+      await AppCache.deleteMany({ key: { $regex: /^dashboard:/ } });
+    } catch {
+      /* ignore */
+    }
+  }
 };
 
 export const cacheLead = async (id, data, ttl = 600) => {
   const redis = getRedisClient();
-  await redis.setex(REDIS_KEYS.leadCache(id), ttl, JSON.stringify(data));
+  const key = REDIS_KEYS.leadCache(id);
+  await redis.setex(key, ttl, JSON.stringify(data));
+  if (!hasHostedRedis()) {
+    try {
+      await AppCache.findOneAndUpdate(
+        { key },
+        { key, value: data, expiresAt: new Date(Date.now() + ttl * 1000) },
+        { upsert: true }
+      );
+    } catch (err) {
+      logger.warn('Mongo lead cache write failed:', err.message || err);
+    }
+  }
 };
 
 export const getCachedLead = async (id) => {
   const redis = getRedisClient();
-  const data = await redis.get(REDIS_KEYS.leadCache(id));
-  return data ? JSON.parse(data) : null;
+  const key = REDIS_KEYS.leadCache(id);
+  const data = await redis.get(key);
+  if (data) return JSON.parse(data);
+
+  if (!hasHostedRedis()) {
+    try {
+      const doc = await AppCache.findOne({ key, expiresAt: { $gt: new Date() } }).lean();
+      if (doc?.value) {
+        const ttlSec = Math.max(1, Math.floor((new Date(doc.expiresAt) - Date.now()) / 1000));
+        await redis.setex(key, ttlSec, JSON.stringify(doc.value));
+        return doc.value;
+      }
+    } catch (err) {
+      logger.warn('Mongo lead cache read failed:', err.message || err);
+    }
+  }
+  return null;
 };
 
 export const invalidateLeadCache = async (id) => {
   const redis = getRedisClient();
-  await redis.del(REDIS_KEYS.leadCache(id));
+  const key = REDIS_KEYS.leadCache(id);
+  await redis.del(key);
+  if (!hasHostedRedis()) {
+    try {
+      await AppCache.deleteOne({ key });
+    } catch {
+      /* ignore */
+    }
+  }
 };
+
+/** Runtime cache backend info for /health. */
+export const getCacheBackendInfo = () => ({
+  hostedRedis: hasHostedRedis(),
+  memoryRedis: isUsingMemoryRedis(),
+  durableFallback: !hasHostedRedis() ? 'mongodb' : null,
+});

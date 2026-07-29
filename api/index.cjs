@@ -55,12 +55,14 @@ module.exports = async function handler(req, res) {
       || url.indexOf('/api/health?') === 0
       || url === '/health'
     ) {
+      const { getCacheBackendInfo } = await import('../src/services/redisService.js');
       res.statusCode = 200;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({
         success: true,
         message: 'Corizo Desk API is running',
         mongo: mongoose.connection.readyState === 1 ? 'connected' : 'pending',
+        cache: getCacheBackendInfo(),
         timestamp: new Date().toISOString(),
       }));
       return;

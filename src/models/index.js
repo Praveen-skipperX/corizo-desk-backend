@@ -27,3 +27,4 @@ export { default as RolePermission } from './RolePermission.js';
 export { default as AppSettings } from './AppSettings.js';
 export { default as AuthSession } from './AuthSession.js';
 export { default as AuthRefreshToken } from './AuthRefreshToken.js';
+export { default as AppCache } from './AppCache.js';

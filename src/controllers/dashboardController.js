@@ -323,7 +323,7 @@ export const getDashboard = asyncHandler(async (req, res) => {
     recentActivities,
   };
 
-  await cacheDashboardStats(scope, scopeId, dashboard, 60);
+  await cacheDashboardStats(scope, scopeId, dashboard, 120);
   successResponse(res, dashboard);
 });
 
