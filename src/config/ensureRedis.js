@@ -20,14 +20,15 @@ const isRedisReachable = (host, port) =>
   });
 
 export const ensureRedis = async () => {
-  // Production / Vercel: rely on REDIS_URL (Upstash, Redis Cloud, etc.)
+  // Production / Vercel: prefer hosted REDIS_URL; otherwise in-memory fallback in getRedisClient()
   if (process.env.VERCEL || config.env === 'production') {
     const url = process.env.REDIS_URL || config.redisUrl;
-    if (!url || url.includes('localhost') || url.includes('127.0.0.1')) {
-      throw new Error('Set REDIS_URL to a hosted Redis instance for production/Vercel');
+    if (url && !url.includes('localhost') && !url.includes('127.0.0.1')) {
+      process.env.REDIS_URL = url;
+      logger.info('Using configured REDIS_URL for production');
+      return;
     }
-    process.env.REDIS_URL = url;
-    logger.info('Using configured REDIS_URL for production');
+    logger.warn('No hosted REDIS_URL — in-memory Redis will be used on Vercel');
     return;
   }
 

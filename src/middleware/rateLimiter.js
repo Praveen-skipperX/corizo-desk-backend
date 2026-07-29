@@ -9,16 +9,25 @@ const SKIP_RATE_LIMIT_PATHS = [
   '/auth/me',
 ];
 
+const hostedRedis =
+  Boolean(process.env.REDIS_URL) &&
+  !String(process.env.REDIS_URL).includes('localhost') &&
+  !String(process.env.REDIS_URL).includes('127.0.0.1');
+
+const redisStore = (prefix) => {
+  if (!hostedRedis) return undefined;
+  return new RedisStore({
+    sendCommand: (...args) => getRedisClient().call(...args),
+    prefix,
+  });
+};
+
 export const apiRateLimiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
-  // SPA polls + dashboards need headroom; default 100 was too low
   max: config.rateLimit.maxRequests,
   standardHeaders: true,
   legacyHeaders: false,
-  store: new RedisStore({
-    sendCommand: (...args) => getRedisClient().call(...args),
-    prefix: 'rl:api:',
-  }),
+  store: redisStore('rl:api:'),
   skip: (req) => {
     const path = req.path || '';
     return SKIP_RATE_LIMIT_PATHS.some((p) => path === p || path.endsWith(p));
@@ -31,10 +40,7 @@ export const authRateLimiter = rateLimit({
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
-  store: new RedisStore({
-    sendCommand: (...args) => getRedisClient().call(...args),
-    prefix: 'rl:auth:',
-  }),
+  store: redisStore('rl:auth:'),
   message: { success: false, message: 'Too many authentication attempts' },
 });
 
@@ -43,9 +49,6 @@ export const otpRateLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  store: new RedisStore({
-    sendCommand: (...args) => getRedisClient().call(...args),
-    prefix: 'rl:otp:',
-  }),
+  store: redisStore('rl:otp:'),
   message: { success: false, message: 'OTP request limit exceeded' },
 });
