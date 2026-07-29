@@ -151,7 +151,7 @@ class MemoryRedis {
   }
 }
 
-const hasHostedRedis = () => {
+export const hasHostedRedis = () => {
   const url = process.env.REDIS_URL || config.redisUrl || '';
   if (!url) return false;
   if (url.includes('127.0.0.1') || url.includes('localhost')) return false;

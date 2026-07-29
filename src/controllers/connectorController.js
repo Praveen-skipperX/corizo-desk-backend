@@ -20,7 +20,9 @@ import { getAdapter, listConnectorTypes, isConnectorImplemented } from '../conne
 import { parseSpreadsheetId } from '../connectors/googleSheets/GoogleSheetsAdapter.js';
 import { previewConnectorImport, commitConnectorImport } from '../services/leadImportService.js';
 import { addConnectorSyncJob } from '../queues/index.js';
+import { shouldRunJobsInline, deferWork } from '../utils/runtime.js';
 import { logActivity } from '../services/auditService.js';
+import logger from '../utils/logger.js';
 import {
   sanitizeCustomFieldKey,
   sanitizeCustomFieldLabel,
@@ -412,6 +414,50 @@ export const confirmImport = asyncHandler(async (req, res) => {
   successResponse(res, result, 'Import completed');
 });
 
+const createPendingSyncLog = async ({ connector, user, triggeredBy = 'user' }) =>
+  ConnectorSyncLog.create({
+    connector: connector._id,
+    connectorType: connector.type || CONNECTOR_TYPES.GOOGLE_SHEETS,
+    connectorName: connector.name,
+    triggeredBy,
+    triggeredByUser: user?._id,
+    mode: 'sync',
+    status: 'pending',
+    phase: 'queued',
+    processedCount: 0,
+    totalToProcess: 0,
+  });
+
+const markSyncFailed = async (syncLogId, message) => {
+  if (!syncLogId) return;
+  try {
+    await ConnectorSyncLog.findByIdAndUpdate(syncLogId, {
+      status: 'failed',
+      phase: 'done',
+      completedAt: new Date(),
+      errorSummary: String(message || 'Sync failed').slice(0, 500),
+    });
+  } catch (err) {
+    logger.error('Failed to mark sync log as failed:', err);
+  }
+};
+
+const runInlineConnectorSync = async ({ connector, user, triggeredBy, syncLogId, jobId }) => {
+  try {
+    await commitConnectorImport({
+      connector,
+      user,
+      mode: 'sync',
+      triggeredBy,
+      syncLogId,
+      jobId,
+    });
+  } catch (err) {
+    await markSyncFailed(syncLogId, err.message || 'Sync failed');
+    logger.error(`Inline connector sync failed (${syncLogId}):`, err.message || err);
+  }
+};
+
 export const syncConnector = asyncHandler(async (req, res) => {
   const connector = await Connector.findById(req.params.id);
   assertConnectorAccess(req.user, connector);
@@ -428,19 +474,38 @@ export const syncConnector = asyncHandler(async (req, res) => {
     }
   }
 
-  // Always queue so sync continues in the background with live progress.
-  const syncLog = await ConnectorSyncLog.create({
-    connector: connector._id,
-    connectorType: connector.type,
-    connectorName: connector.name,
-    triggeredBy: 'user',
-    triggeredByUser: req.user._id,
-    mode: 'sync',
-    status: 'pending',
-    phase: 'queued',
-    processedCount: 0,
-    totalToProcess: 0,
-  });
+  const syncLog = await createPendingSyncLog({ connector, user: req.user, triggeredBy: 'user' });
+
+  // Vercel / no workers: run import inline (waitUntil when available) so sync actually runs
+  // and SyncProgressDock can poll ConnectorSyncLog progress.
+  if (shouldRunJobsInline()) {
+    const jobId = `inline-${syncLog._id}`;
+    syncLog.jobId = jobId;
+    await syncLog.save();
+
+    await deferWork(() =>
+      runInlineConnectorSync({
+        connector,
+        user: req.user,
+        triggeredBy: 'user',
+        syncLogId: syncLog._id.toString(),
+        jobId,
+      })
+    );
+
+    return successResponse(
+      res,
+      {
+        syncLogId: syncLog._id,
+        jobId,
+        connectorId: connector._id,
+        connectorName: connector.name,
+        status: 'pending',
+        inline: true,
+      },
+      'Sync started. Progress updates live in the bottom-right panel.'
+    );
+  }
 
   const job = await addConnectorSyncJob({
     connectorId: connector._id.toString(),
@@ -471,21 +536,55 @@ export const syncAllConnectors = asyncHandler(async (req, res) => {
     status: CONNECTOR_STATUSES.ACTIVE,
     type: req.query.type || CONNECTOR_TYPES.GOOGLE_SHEETS,
   };
-  const connectors = await Connector.find(filter).select('_id name type');
+  const connectors = await Connector.find(filter);
   const jobs = [];
+
+  if (shouldRunJobsInline()) {
+    const workItems = [];
+    for (const c of connectors) {
+      const syncLog = await createPendingSyncLog({ connector: c, user: req.user, triggeredBy: 'user' });
+      const jobId = `inline-${syncLog._id}`;
+      syncLog.jobId = jobId;
+      await syncLog.save();
+      jobs.push({
+        connectorId: c._id,
+        name: c.name,
+        jobId,
+        syncLogId: syncLog._id,
+      });
+      workItems.push({
+        connector: c,
+        syncLogId: syncLog._id.toString(),
+        jobId,
+      });
+    }
+
+    if (workItems.length) {
+      await deferWork(async () => {
+        // Sequential to avoid exhausting Sheets API / Mongo on serverless
+        for (const item of workItems) {
+          await runInlineConnectorSync({
+            connector: item.connector,
+            user: req.user,
+            triggeredBy: 'user',
+            syncLogId: item.syncLogId,
+            jobId: item.jobId,
+          });
+        }
+      });
+    }
+
+    return successResponse(
+      res,
+      { queued: jobs.length, jobs, inline: true },
+      jobs.length
+        ? 'Sync started. Progress updates live in the bottom-right panel.'
+        : 'No active sheets to sync'
+    );
+  }
+
   for (const c of connectors) {
-    const syncLog = await ConnectorSyncLog.create({
-      connector: c._id,
-      connectorType: c.type || CONNECTOR_TYPES.GOOGLE_SHEETS,
-      connectorName: c.name,
-      triggeredBy: 'user',
-      triggeredByUser: req.user._id,
-      mode: 'sync',
-      status: 'pending',
-      phase: 'queued',
-      processedCount: 0,
-      totalToProcess: 0,
-    });
+    const syncLog = await createPendingSyncLog({ connector: c, user: req.user, triggeredBy: 'user' });
     const job = await addConnectorSyncJob({
       connectorId: c._id.toString(),
       userId: req.user._id.toString(),
