@@ -720,6 +720,25 @@ export const listSyncLogs = asyncHandler(async (req, res) => {
   const accessibleIds = await Connector.find(connectorFilter).select('_id');
   const ids = accessibleIds.map((c) => c._id);
 
+  // Same abandoned-job cleanup as live progress (so Sync History doesn't stay Pending)
+  const queuedStaleBefore = new Date(Date.now() - 2 * 60 * 1000);
+  await ConnectorSyncLog.updateMany(
+    {
+      connector: { $in: ids },
+      mode: { $ne: 'preview' },
+      status: 'pending',
+      createdAt: { $lt: queuedStaleBefore },
+    },
+    {
+      $set: {
+        status: 'failed',
+        phase: 'done',
+        completedAt: new Date(),
+        errorSummary: 'Sync never started (queue abandoned). Please try again.',
+      },
+    }
+  );
+
   const filter = {
     mode: { $ne: 'preview' },
     ...(ids.length ? { connector: { $in: ids } } : { connector: { $in: [] } }),

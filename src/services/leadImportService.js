@@ -16,23 +16,15 @@ import {
   ACTIVITY_ACTIONS,
   ENTITY_TYPES,
 } from '../constants/index.js';
-import { generateLeadId } from '../utils/helpers.js';
+import { generateLeadIds } from '../utils/helpers.js';
 import { pickPersistableLeadFields, mergeCustomFields } from '../utils/customFields.js';
 import { resolveLeadDate } from '../utils/leadDate.js';
 import { logActivity } from './auditService.js';
 import logger from '../utils/logger.js';
 
-const addTimelineEvent = async ({ leadId, type, title, description, actor, actorName, metadata }) => {
-  await LeadTimelineEvent.create({
-    lead: leadId,
-    type,
-    title,
-    description,
-    actor,
-    actorName,
-    metadata,
-  });
-};
+const INSERT_BATCH = 250;
+const UPDATE_BATCH = 200;
+const PROGRESS_MIN_MS = 800;
 
 const classifyRows = async ({ rows, connector, adapter, onProgress }) => {
   const classified = {
@@ -92,7 +84,7 @@ const classifyRows = async ({ rows, connector, adapter, onProgress }) => {
     }
 
     index += 1;
-    if (typeof onProgress === 'function' && (index % 50 === 0 || index === rows.length)) {
+    if (typeof onProgress === 'function' && (index % 200 === 0 || index === rows.length)) {
       await onProgress({ processed: index, total: rows.length });
     }
   }
@@ -171,6 +163,12 @@ const buildLeadWritePayload = (leadFields, connector) => {
   return pickPersistableLeadFields(fields);
 };
 
+const chunk = (arr, size) => {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+};
+
 /**
  * Commit import: insert new leads; optionally update duplicates; full replace for SA.
  * Supports live progress via syncLog.processedCount / totalToProcess.
@@ -237,7 +235,7 @@ export const commitConnectorImport = async ({
       onProgress: syncLog
         ? async ({ processed, total }) => {
           const now = Date.now();
-          if (now - lastClassifyWrite < 500 && processed !== total) return;
+          if (now - lastClassifyWrite < PROGRESS_MIN_MS && processed !== total) return;
           lastClassifyWrite = now;
           await ConnectorSyncLog.findByIdAndUpdate(syncLog._id, {
             phase: 'classifying',
@@ -302,7 +300,7 @@ export const commitConnectorImport = async ({
 
   const bumpProgress = async (force = false) => {
     const now = Date.now();
-    if (!force && now - lastProgressWrite < 300) return;
+    if (!force && now - lastProgressWrite < PROGRESS_MIN_MS) return;
     lastProgressWrite = now;
     await ConnectorSyncLog.findByIdAndUpdate(syncLog._id, {
       processedCount,
@@ -323,98 +321,128 @@ export const commitConnectorImport = async ({
       );
     }
 
-    for (const item of classified.newRows) {
+    // --- Batched inserts (avoid per-row generateLeadId + create + timeline) ---
+    const newChunks = chunk(classified.newRows, INSERT_BATCH);
+    for (const batch of newChunks) {
       try {
-        const persistable = buildLeadWritePayload(item.leadFields, connector);
-        const leadId = await generateLeadId(Lead);
-        const lead = await Lead.create({
-          ...persistable,
-          leadId,
-          createdBy: user?._id || connector.createdBy,
-          duplicateHash: buildDuplicateHash(persistable.phone, persistable.email),
-          importMeta: {
-            connectorId: String(connector._id),
-            connectorType: connector.type,
-            connectorName: connector.name,
-            externalRef: {
-              spreadsheetId: connector.config?.spreadsheetId,
-              worksheet: connector.config?.worksheetName,
-              sheetTitle: connector.config?.spreadsheetTitle,
-              rowKey: item.rowKey,
+        const leadIds = await generateLeadIds(Lead, batch.length);
+        const now = new Date();
+        const docs = batch.map((item, i) => {
+          const persistable = buildLeadWritePayload(item.leadFields, connector);
+          return {
+            ...persistable,
+            leadId: leadIds[i],
+            createdBy: user?._id || connector.createdBy,
+            duplicateHash: buildDuplicateHash(persistable.phone, persistable.email),
+            importMeta: {
+              connectorId: String(connector._id),
+              connectorType: connector.type,
+              connectorName: connector.name,
+              externalRef: {
+                spreadsheetId: connector.config?.spreadsheetId,
+                worksheet: connector.config?.worksheetName,
+                sheetTitle: connector.config?.spreadsheetTitle,
+                rowKey: item.rowKey,
+              },
+              importedAt: now,
+              importedBy: user?._id,
+              lastSyncedAt: now,
+              originalRow: item.row,
             },
-            importedAt: new Date(),
-            importedBy: user?._id,
-            lastSyncedAt: new Date(),
-            originalRow: item.row,
-          },
+          };
         });
 
-        await addTimelineEvent({
-          leadId: lead._id,
-          type: TIMELINE_EVENT_TYPES.IMPORTED_FROM_CONNECTOR,
-          title: 'Imported from connector',
-          description: `Imported from ${connector.type.replace('_', ' ')}: ${connector.name}`,
-          actor: user?._id,
-          actorName: user?.name,
-          metadata: {
-            connectorId: connector._id,
-            connectorName: connector.name,
-            connectorType: connector.type,
-          },
-        });
+        const inserted = await Lead.insertMany(docs, { ordered: false });
+        importedCount += inserted.length;
 
-        importedCount += 1;
+        if (inserted.length) {
+          const timelineDocs = inserted.map((lead) => ({
+            lead: lead._id,
+            type: TIMELINE_EVENT_TYPES.IMPORTED_FROM_CONNECTOR,
+            title: 'Imported from connector',
+            description: `Imported from ${connector.type.replace('_', ' ')}: ${connector.name}`,
+            actor: user?._id,
+            actorName: user?.name,
+            metadata: {
+              connectorId: connector._id,
+              connectorName: connector.name,
+              connectorType: connector.type,
+            },
+          }));
+          await LeadTimelineEvent.insertMany(timelineDocs, { ordered: false });
+        }
       } catch (err) {
-        failedCount += 1;
-        errors.push({ message: err.message, row: item.rowKey });
+        // insertMany with ordered:false may throw BulkWriteError after partial success
+        const nInserted = err?.result?.result?.nInserted
+          ?? err?.insertedDocs?.length
+          ?? err?.result?.insertedCount
+          ?? 0;
+        if (nInserted > 0) {
+          importedCount += nInserted;
+          failedCount += batch.length - nInserted;
+        } else {
+          failedCount += batch.length;
+        }
+        errors.push({ message: err.message, row: 'batch-insert' });
+        logger.error('Batch lead insert failed', { message: err.message, batchSize: batch.length });
       }
-      processedCount += 1;
-      if (processedCount % 3 === 0 || processedCount === totalToProcess) {
-        await bumpProgress();
-      }
+
+      processedCount += batch.length;
+      await bumpProgress();
     }
 
+    // --- Batched updates for insert_update / full_replace ---
     if (processUpdates) {
-      for (const item of classified.duplicateRows) {
-        try {
-          if (!item.existingLeadId || String(item.existingLeadId) === 'pending') {
-            processedCount += 1;
-            if (processedCount % 3 === 0 || processedCount === totalToProcess) {
-              await bumpProgress();
+      const updatable = classified.duplicateRows.filter(
+        (item) => item.existingLeadId && String(item.existingLeadId) !== 'pending'
+      );
+      const skippedDupes = classified.duplicateRows.length - updatable.length;
+      processedCount += skippedDupes;
+
+      const existingIds = updatable.map((item) => item.existingLeadId);
+      const existingLeads = await Lead.find({ _id: { $in: existingIds } })
+        .select('_id customFields leadDate createdAt')
+        .lean();
+      const existingById = new Map(existingLeads.map((l) => [String(l._id), l]));
+
+      const updateChunks = chunk(updatable, UPDATE_BATCH);
+      for (const batch of updateChunks) {
+        const ops = [];
+        const timelineDocs = [];
+        const now = new Date();
+
+        for (const item of batch) {
+          try {
+            const persistable = buildLeadWritePayload(item.leadFields, connector);
+            delete persistable.status;
+            const existing = existingById.get(String(item.existingLeadId));
+            const $set = {
+              name: persistable.name,
+              phone: persistable.phone,
+              email: persistable.email,
+              course: persistable.course,
+              'importMeta.lastSyncedAt': now,
+              'importMeta.originalRow': item.row,
+              lastActivityAt: now,
+            };
+            if (persistable.customFields?.length) {
+              $set.customFields = mergeCustomFields(existing?.customFields || [], persistable.customFields);
             }
-            continue;
-          }
-          const persistable = buildLeadWritePayload(item.leadFields, connector);
-          delete persistable.status;
+            $set.leadDate = resolveLeadDate({
+              customFields: $set.customFields || existing?.customFields,
+              importMeta: { originalRow: item.row },
+              leadDate: persistable.leadDate || existing?.leadDate,
+              createdAt: existing?.createdAt,
+            }) || existing?.createdAt || now;
 
-          const existing = await Lead.findById(item.existingLeadId).select('customFields leadDate createdAt');
-          const $set = {
-            name: persistable.name,
-            phone: persistable.phone,
-            email: persistable.email,
-            course: persistable.course,
-            'importMeta.lastSyncedAt': new Date(),
-            'importMeta.originalRow': item.row,
-            lastActivityAt: new Date(),
-          };
-          if (persistable.customFields?.length) {
-            $set.customFields = mergeCustomFields(existing?.customFields || [], persistable.customFields);
-          }
-          $set.leadDate = resolveLeadDate({
-            customFields: $set.customFields || existing?.customFields,
-            importMeta: { originalRow: item.row },
-            leadDate: persistable.leadDate || existing?.leadDate,
-            createdAt: existing?.createdAt,
-          }) || existing?.createdAt || new Date();
-
-          const updated = await Lead.findByIdAndUpdate(
-            item.existingLeadId,
-            { $set },
-            { new: true }
-          );
-          if (updated) {
-            await addTimelineEvent({
-              leadId: updated._id,
+            ops.push({
+              updateOne: {
+                filter: { _id: item.existingLeadId },
+                update: { $set },
+              },
+            });
+            timelineDocs.push({
+              lead: item.existingLeadId,
               type: TIMELINE_EVENT_TYPES.UPDATED_BY_SYNC,
               title: 'Updated by sync',
               description: `Updated from ${connector.name}`,
@@ -422,16 +450,32 @@ export const commitConnectorImport = async ({
               actorName: user?.name,
               metadata: { connectorId: connector._id },
             });
-            updatedCount += 1;
+          } catch (err) {
+            failedCount += 1;
+            errors.push({ message: err.message, row: item.rowKey });
           }
-        } catch (err) {
-          failedCount += 1;
-          errors.push({ message: err.message, row: item.rowKey });
         }
-        processedCount += 1;
-        if (processedCount % 3 === 0 || processedCount === totalToProcess) {
-          await bumpProgress();
+
+        if (ops.length) {
+          try {
+            const result = await Lead.bulkWrite(ops, { ordered: false });
+            const n = (result.modifiedCount || 0) + (result.matchedCount || 0) > 0
+              ? result.modifiedCount || ops.length
+              : ops.length;
+            // Prefer matchedCount when modified is 0 (identical data)
+            updatedCount += result.modifiedCount || result.matchedCount || n;
+            if (timelineDocs.length) {
+              await LeadTimelineEvent.insertMany(timelineDocs, { ordered: false });
+            }
+          } catch (err) {
+            failedCount += ops.length;
+            errors.push({ message: err.message, row: 'batch-update' });
+            logger.error('Batch lead update failed', { message: err.message, batchSize: ops.length });
+          }
         }
+
+        processedCount += batch.length;
+        await bumpProgress();
       }
     }
 

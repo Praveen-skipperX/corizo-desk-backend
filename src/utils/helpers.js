@@ -17,24 +17,61 @@ export const getDeviceInfo = (req) => {
   };
 };
 
+const LEAD_ID_CHARS = '0123456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+
+const makeLeadIdCandidate = () => {
+  const useNumeric = Math.random() < 0.4;
+  let suffix;
+  if (useNumeric) {
+    suffix = String(Math.floor(1000 + Math.random() * 9000));
+  } else {
+    suffix = Array.from({ length: 5 }, () => LEAD_ID_CHARS[Math.floor(Math.random() * LEAD_ID_CHARS.length)]).join('');
+  }
+  return `LEAD-${suffix}`;
+};
+
 export const generateLeadId = async (Lead) => {
-  const chars = '0123456789ABCDEFGHJKLMNPQRSTUVWXYZ';
   const maxAttempts = 20;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const useNumeric = Math.random() < 0.4;
-    let suffix;
-    if (useNumeric) {
-      suffix = String(Math.floor(1000 + Math.random() * 9000));
-    } else {
-      suffix = Array.from({ length: 5 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
-    }
-    const leadId = `LEAD-${suffix}`;
+    const leadId = makeLeadIdCandidate();
     const exists = await Lead.findOne({ leadId }).select('_id').lean();
     if (!exists) return leadId;
   }
 
   return `LEAD-${Date.now().toString(36).toUpperCase().slice(-5)}`;
+};
+
+/**
+ * Reserve many unique lead codes with minimal round-trips (one collision check per batch).
+ */
+export const generateLeadIds = async (Lead, count) => {
+  if (count <= 0) return [];
+  const reserved = [];
+  let guard = 0;
+
+  while (reserved.length < count && guard < 30) {
+    guard += 1;
+    const need = count - reserved.length;
+    const candidates = new Set();
+    while (candidates.size < need + Math.min(40, need)) {
+      candidates.add(makeLeadIdCandidate());
+    }
+    const list = [...candidates];
+    const existing = await Lead.find({ leadId: { $in: list } }).select('leadId').lean();
+    const taken = new Set(existing.map((e) => e.leadId));
+    for (const id of list) {
+      if (taken.has(id)) continue;
+      reserved.push(id);
+      if (reserved.length >= count) break;
+    }
+  }
+
+  while (reserved.length < count) {
+    reserved.push(`LEAD-${Date.now().toString(36).toUpperCase()}${reserved.length}`);
+  }
+
+  return reserved.slice(0, count);
 };
 
 export const generateOtp = () => {
