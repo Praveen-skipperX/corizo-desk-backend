@@ -1,0 +1,15 @@
+node_modules/
+dist/
+uploads/
+coverage/
+logs/
+*.log
+.env
+.env.local
+.env.*.local
+*.local.txt
+scripts/superadmin-credentials.local.txt
+.redis-dev-url
+.DS_Store
+.vscode/
+.idea/
