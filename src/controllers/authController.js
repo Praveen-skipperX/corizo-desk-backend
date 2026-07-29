@@ -50,14 +50,17 @@ import { logActivity, ACTIVITY_ACTIONS, ENTITY_TYPES } from '../services/auditSe
 
 const getTotpSecret = (authConfig) => decryptSecret(authConfig?.secret);
 
-const refreshCookieOptions = () => ({
-  httpOnly: true,
-  secure: config.env === 'production',
-  // lax keeps login cookies working reliably for SPA + API on localhost / same site
-  sameSite: 'lax',
-  path: '/',
-  maxAge: config.security.sessionTtlSeconds * 1000,
-});
+const refreshCookieOptions = () => {
+  const isProd = config.env === 'production';
+  return {
+    httpOnly: true,
+    secure: isProd,
+    // Cross-site (Vercel frontend → API host) needs SameSite=None + Secure
+    sameSite: isProd ? 'none' : 'lax',
+    path: '/',
+    maxAge: config.security.sessionTtlSeconds * 1000,
+  };
+};
 
 const resolvePermissionsForUser = async (user) => {
   let permissions = await getPermissionsForRoleSlug(user.role);
@@ -746,7 +749,7 @@ export const logout = asyncHandler(async (req, res) => {
 
   res.clearCookie('refreshToken', {
     path: '/',
-    sameSite: 'lax',
+    sameSite: config.env === 'production' ? 'none' : 'lax',
     secure: config.env === 'production',
   });
 

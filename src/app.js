@@ -18,7 +18,12 @@ app.set('etag', false);
 
 app.use(helmet());
 app.use(cors({
-  origin: config.frontendUrl,
+  origin(origin, callback) {
+    // Non-browser / same-origin tools
+    if (!origin) return callback(null, true);
+    if (config.frontendOrigins.includes(origin)) return callback(null, true);
+    return callback(null, false);
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
