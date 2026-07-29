@@ -26,6 +26,25 @@ const INSERT_BATCH = 250;
 const UPDATE_BATCH = 200;
 const PROGRESS_MIN_MS = 800;
 
+/** Thrown when user pauses/cancels mid-sync (cooperative abort). */
+export class SyncControlError extends Error {
+  constructor(status = 'cancelled') {
+    const normalized = status === 'paused' ? 'paused' : 'cancelled';
+    super(normalized === 'paused' ? 'Sync paused by user' : 'Sync cancelled by user');
+    this.name = 'SyncControlError';
+    this.syncStatus = normalized;
+  }
+}
+
+const assertSyncStillActive = async (syncLogId) => {
+  if (!syncLogId) return;
+  const log = await ConnectorSyncLog.findById(syncLogId).select('status').lean();
+  if (!log) return;
+  if (log.status === 'cancelled' || log.status === 'paused') {
+    throw new SyncControlError(log.status);
+  }
+};
+
 const classifyRows = async ({ rows, connector, adapter, onProgress }) => {
   const classified = {
     rowsFound: rows.length,
@@ -234,15 +253,23 @@ export const commitConnectorImport = async ({
       adapter,
       onProgress: syncLog
         ? async ({ processed, total }) => {
+          await assertSyncStillActive(syncLog._id);
           const now = Date.now();
           if (now - lastClassifyWrite < PROGRESS_MIN_MS && processed !== total) return;
           lastClassifyWrite = now;
-          await ConnectorSyncLog.findByIdAndUpdate(syncLog._id, {
-            phase: 'classifying',
-            rowsFound: total,
-            processedCount: processed,
-            totalToProcess: total,
-          });
+          const updated = await ConnectorSyncLog.findOneAndUpdate(
+            { _id: syncLog._id, status: { $in: ['pending', 'running'] } },
+            {
+              $set: {
+                phase: 'classifying',
+                rowsFound: total,
+                processedCount: processed,
+                totalToProcess: total,
+                status: 'running',
+              },
+            }
+          );
+          if (!updated) await assertSyncStillActive(syncLog._id);
         }
         : undefined,
     });
@@ -302,15 +329,55 @@ export const commitConnectorImport = async ({
     const now = Date.now();
     if (!force && now - lastProgressWrite < PROGRESS_MIN_MS) return;
     lastProgressWrite = now;
+    // Never overwrite a user cancel/pause
+    const updated = await ConnectorSyncLog.findOneAndUpdate(
+      { _id: syncLog._id, status: { $in: ['pending', 'running'] } },
+      {
+        $set: {
+          processedCount,
+          importedCount,
+          updatedCount,
+          phase: 'importing',
+          status: 'running',
+        },
+      },
+      { new: true }
+    );
+    if (!updated) {
+      await assertSyncStillActive(syncLog._id);
+    }
+  };
+
+  const finalizeStopped = async (status) => {
+    const completedAt = new Date();
     await ConnectorSyncLog.findByIdAndUpdate(syncLog._id, {
+      status,
+      phase: 'done',
+      completedAt,
+      durationMs: completedAt - startedAt,
       processedCount,
+      totalToProcess,
       importedCount,
       updatedCount,
-      phase: 'importing',
+      errorSummary: status === 'paused' ? 'Sync paused by user' : 'Sync cancelled by user',
     });
+    return {
+      syncLogId: syncLog._id,
+      importedCount,
+      updatedCount,
+      duplicateCount: classified.duplicateRows.length,
+      invalidCount: classified.invalidRows?.length || 0,
+      failedCount,
+      processedCount,
+      totalToProcess,
+      stopped: true,
+      status,
+    };
   };
 
   try {
+    await assertSyncStillActive(syncLog._id);
+
     if (syncMode === SYNC_MODES.FULL_REPLACE) {
       await Lead.updateMany(
         {
@@ -324,6 +391,7 @@ export const commitConnectorImport = async ({
     // --- Batched inserts (avoid per-row generateLeadId + create + timeline) ---
     const newChunks = chunk(classified.newRows, INSERT_BATCH);
     for (const batch of newChunks) {
+      await assertSyncStillActive(syncLog._id);
       try {
         const leadIds = await generateLeadIds(Lead, batch.length);
         const now = new Date();
@@ -372,6 +440,7 @@ export const commitConnectorImport = async ({
           await LeadTimelineEvent.insertMany(timelineDocs, { ordered: false });
         }
       } catch (err) {
+        if (err instanceof SyncControlError) throw err;
         // insertMany with ordered:false may throw BulkWriteError after partial success
         const nInserted = err?.result?.result?.nInserted
           ?? err?.insertedDocs?.length
@@ -407,6 +476,7 @@ export const commitConnectorImport = async ({
 
       const updateChunks = chunk(updatable, UPDATE_BATCH);
       for (const batch of updateChunks) {
+        await assertSyncStillActive(syncLog._id);
         const ops = [];
         const timelineDocs = [];
         const now = new Date();
@@ -462,12 +532,12 @@ export const commitConnectorImport = async ({
             const n = (result.modifiedCount || 0) + (result.matchedCount || 0) > 0
               ? result.modifiedCount || ops.length
               : ops.length;
-            // Prefer matchedCount when modified is 0 (identical data)
             updatedCount += result.modifiedCount || result.matchedCount || n;
             if (timelineDocs.length) {
               await LeadTimelineEvent.insertMany(timelineDocs, { ordered: false });
             }
           } catch (err) {
+            if (err instanceof SyncControlError) throw err;
             failedCount += ops.length;
             errors.push({ message: err.message, row: 'batch-update' });
             logger.error('Batch lead update failed', { message: err.message, batchSize: ops.length });
@@ -482,18 +552,29 @@ export const commitConnectorImport = async ({
     await bumpProgress(true);
 
     const completedAt = new Date();
-    await ConnectorSyncLog.findByIdAndUpdate(syncLog._id, {
-      status: failedCount && !importedCount && !updatedCount ? 'failed' : 'completed',
-      phase: 'done',
-      completedAt,
-      durationMs: completedAt - startedAt,
-      processedCount,
-      totalToProcess,
-      importedCount,
-      updatedCount,
-      errorSummary: errors.length ? errors[0].message : undefined,
-      errors: errors.slice(0, 50),
-    });
+    const stillActive = await ConnectorSyncLog.findOneAndUpdate(
+      { _id: syncLog._id, status: { $in: ['pending', 'running'] } },
+      {
+        $set: {
+          status: failedCount && !importedCount && !updatedCount ? 'failed' : 'completed',
+          phase: 'done',
+          completedAt,
+          durationMs: completedAt - startedAt,
+          processedCount,
+          totalToProcess,
+          importedCount,
+          updatedCount,
+          errorSummary: errors.length ? errors[0].message : undefined,
+          errors: errors.slice(0, 50),
+        },
+      },
+      { new: true }
+    );
+
+    if (!stillActive) {
+      const current = await ConnectorSyncLog.findById(syncLog._id).select('status').lean();
+      return finalizeStopped(current?.status === 'paused' ? 'paused' : 'cancelled');
+    }
 
     const health = connector.health || {};
     await Connector.findByIdAndUpdate(connector._id, {
@@ -534,6 +615,9 @@ export const commitConnectorImport = async ({
       totalToProcess,
     };
   } catch (error) {
+    if (error instanceof SyncControlError) {
+      return finalizeStopped(error.syncStatus);
+    }
     logger.error('Connector import failed', { error: error.message, connectorId: connector._id });
     await ConnectorSyncLog.findByIdAndUpdate(syncLog._id, {
       status: 'failed',

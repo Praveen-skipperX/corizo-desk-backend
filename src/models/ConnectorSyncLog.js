@@ -39,7 +39,7 @@ const connectorSyncLogSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['pending', 'running', 'completed', 'failed', 'cancelled'],
+      enum: ['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'],
       default: 'pending',
       index: true,
     },

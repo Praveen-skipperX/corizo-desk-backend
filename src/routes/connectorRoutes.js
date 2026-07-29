@@ -15,6 +15,9 @@ import {
   syncConnector,
   syncAllConnectors,
   getSyncProgress,
+  pauseSyncLog,
+  cancelSyncLog,
+  cancelActiveSyncs,
   listSyncLogs,
   getConnectorDashboard,
   getGoogleSheetsSetup,
@@ -42,6 +45,9 @@ router.get('/setup', requirePermission('google_sheets.settings', 'google_sheets.
 router.get('/dashboard', requirePermission('google_sheets.view'), getConnectorDashboard);
 router.get('/sync-progress', requirePermission('google_sheets.sync', 'google_sheets.sync_all', 'google_sheets.view'), getSyncProgress);
 router.get('/sync-logs', requirePermission('google_sheets.history'), listSyncLogs);
+router.post('/sync-logs/cancel-active', requirePermission('google_sheets.sync', 'google_sheets.sync_all'), cancelActiveSyncs);
+router.post('/sync-logs/:syncLogId/pause', requirePermission('google_sheets.sync', 'google_sheets.sync_all'), pauseSyncLog);
+router.post('/sync-logs/:syncLogId/cancel', requirePermission('google_sheets.sync', 'google_sheets.sync_all'), cancelSyncLog);
 router.post('/sync-all', requirePermission('google_sheets.sync_all'), syncAllConnectors);
 router.post('/headers', requirePermission('google_sheets.add', 'google_sheets.edit'), validate(fetchHeadersSchema), fetchConnectorHeaders);
 

@@ -609,6 +609,99 @@ export const syncAllConnectors = asyncHandler(async (req, res) => {
   );
 });
 
+const stopSyncLog = async ({ syncLogId, user, status }) => {
+  const syncLog = await ConnectorSyncLog.findById(syncLogId);
+  if (!syncLog || syncLog.mode === 'preview') {
+    throw new AppError('Sync job not found', 404);
+  }
+
+  const connector = await Connector.findById(syncLog.connector);
+  assertConnectorAccess(user, connector);
+
+  if (!['pending', 'running'].includes(syncLog.status)) {
+    return syncLog;
+  }
+
+  const completedAt = new Date();
+  syncLog.status = status;
+  syncLog.phase = 'done';
+  syncLog.completedAt = completedAt;
+  syncLog.durationMs = completedAt - (syncLog.startedAt || syncLog.createdAt || completedAt);
+  syncLog.errorSummary =
+    status === 'paused' ? 'Sync paused by user' : 'Sync cancelled by user';
+  await syncLog.save();
+  return syncLog;
+};
+
+export const pauseSyncLog = asyncHandler(async (req, res) => {
+  const syncLog = await stopSyncLog({
+    syncLogId: req.params.syncLogId,
+    user: req.user,
+    status: 'paused',
+  });
+  successResponse(
+    res,
+    {
+      syncLogId: syncLog._id,
+      status: syncLog.status,
+      importedCount: syncLog.importedCount,
+      processedCount: syncLog.processedCount,
+    },
+    syncLog.status === 'paused' ? 'Sync paused' : 'Sync already finished'
+  );
+});
+
+export const cancelSyncLog = asyncHandler(async (req, res) => {
+  const syncLog = await stopSyncLog({
+    syncLogId: req.params.syncLogId,
+    user: req.user,
+    status: 'cancelled',
+  });
+  successResponse(
+    res,
+    {
+      syncLogId: syncLog._id,
+      status: syncLog.status,
+      importedCount: syncLog.importedCount,
+      processedCount: syncLog.processedCount,
+    },
+    syncLog.status === 'cancelled' ? 'Sync cancelled' : 'Sync already finished'
+  );
+});
+
+export const cancelActiveSyncs = asyncHandler(async (req, res) => {
+  const scope = buildConnectorScope(req.user);
+  const connectorFilter = { ...scope };
+  delete connectorFilter.isDeleted;
+  const accessibleIds = await Connector.find(connectorFilter).select('_id');
+  const ids = accessibleIds.map((c) => c._id);
+  const completedAt = new Date();
+
+  const result = await ConnectorSyncLog.updateMany(
+    {
+      connector: { $in: ids },
+      mode: { $ne: 'preview' },
+      status: { $in: ['pending', 'running'] },
+    },
+    {
+      $set: {
+        status: 'cancelled',
+        phase: 'done',
+        completedAt,
+        errorSummary: 'Sync cancelled by user',
+      },
+    }
+  );
+
+  successResponse(
+    res,
+    { cancelled: result.modifiedCount || 0 },
+    result.modifiedCount
+      ? `Cancelled ${result.modifiedCount} sync job(s)`
+      : 'No active syncs to cancel'
+  );
+});
+
 export const getSyncProgress = asyncHandler(async (req, res) => {
   // Include soft-deleted connectors so in-flight / recent jobs still appear
   const scope = buildConnectorScope(req.user);
@@ -676,7 +769,7 @@ export const getSyncProgress = asyncHandler(async (req, res) => {
   const recent = await ConnectorSyncLog.find({
     connector: { $in: ids },
     mode: { $ne: 'preview' },
-    status: { $in: ['completed', 'failed', 'cancelled'] },
+    status: { $in: ['completed', 'failed', 'cancelled', 'paused'] },
     completedAt: { $gte: since },
   })
     .populate('connector', 'name type')
