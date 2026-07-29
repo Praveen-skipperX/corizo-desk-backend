@@ -2,6 +2,8 @@ import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
 import config from '../config/index.js';
 import { getRedisClient, REDIS_KEYS } from '../config/redis.js';
+import AuthSession from '../models/AuthSession.js';
+import AuthRefreshToken from '../models/AuthRefreshToken.js';
 
 export const generateAccessToken = (payload) => {
   return jwt.sign(payload, config.jwt.accessSecret, {
@@ -23,6 +25,32 @@ export const verifyRefreshToken = (token) => {
   return jwt.verify(token, config.jwt.refreshSecret);
 };
 
+const sessionExpiryDate = () =>
+  new Date(Date.now() + config.security.sessionTtlSeconds * 1000);
+
+const persistSessionMongo = async (sessionId, data) => {
+  const userId = data.userId;
+  if (!userId) return;
+  await AuthSession.findOneAndUpdate(
+    { sessionId },
+    {
+      sessionId,
+      userId,
+      payload: data,
+      expiresAt: sessionExpiryDate(),
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+};
+
+const readSessionMongo = async (sessionId) => {
+  const row = await AuthSession.findOne({
+    sessionId,
+    expiresAt: { $gt: new Date() },
+  }).lean();
+  return row?.payload || null;
+};
+
 export const storeSession = async (sessionId, data) => {
   const redis = getRedisClient();
   await redis.setex(
@@ -34,27 +62,51 @@ export const storeSession = async (sessionId, data) => {
     await redis.sadd(REDIS_KEYS.userSessions(data.userId), sessionId);
     await redis.expire(REDIS_KEYS.userSessions(data.userId), config.security.sessionTtlSeconds);
   }
+  // Durable store for Vercel / multi-instance (memory Redis is not shared)
+  await persistSessionMongo(sessionId, data);
 };
 
 /** Sliding session: keep the device trusted until logout. */
 export const touchSession = async (sessionId) => {
   const redis = getRedisClient();
   const key = REDIS_KEYS.session(sessionId);
+  let parsed = null;
   const data = await redis.get(key);
-  if (!data) return null;
-  const parsed = JSON.parse(data);
+  if (data) {
+    parsed = JSON.parse(data);
+  } else {
+    parsed = await readSessionMongo(sessionId);
+  }
+  if (!parsed) return null;
+
   parsed.lastSeenAt = new Date().toISOString();
   await redis.setex(key, config.security.sessionTtlSeconds, JSON.stringify(parsed));
   if (parsed.userId) {
     await redis.expire(REDIS_KEYS.userSessions(parsed.userId), config.security.sessionTtlSeconds);
   }
+  await persistSessionMongo(sessionId, parsed);
   return parsed;
 };
 
 export const getSession = async (sessionId) => {
   const redis = getRedisClient();
   const data = await redis.get(REDIS_KEYS.session(sessionId));
-  return data ? JSON.parse(data) : null;
+  if (data) return JSON.parse(data);
+
+  const fromMongo = await readSessionMongo(sessionId);
+  if (fromMongo) {
+    // Re-hydrate Redis for subsequent requests on this instance
+    await redis.setex(
+      REDIS_KEYS.session(sessionId),
+      config.security.sessionTtlSeconds,
+      JSON.stringify(fromMongo)
+    );
+    if (fromMongo.userId) {
+      await redis.sadd(REDIS_KEYS.userSessions(fromMongo.userId), sessionId);
+      await redis.expire(REDIS_KEYS.userSessions(fromMongo.userId), config.security.sessionTtlSeconds);
+    }
+  }
+  return fromMongo;
 };
 
 export const deleteSession = async (sessionId) => {
@@ -64,13 +116,20 @@ export const deleteSession = async (sessionId) => {
   if (data?.userId) {
     await redis.srem(REDIS_KEYS.userSessions(data.userId), sessionId);
   }
+  await AuthSession.deleteOne({ sessionId });
 };
 
 export const listUserSessions = async (userId, currentSessionId) => {
   const redis = getRedisClient();
-  const sessionIds = await redis.smembers(REDIS_KEYS.userSessions(userId));
-  const sessions = [];
+  const sessionIds = new Set(await redis.smembers(REDIS_KEYS.userSessions(userId)));
 
+  const mongoRows = await AuthSession.find({
+    userId,
+    expiresAt: { $gt: new Date() },
+  }).lean();
+  mongoRows.forEach((r) => sessionIds.add(r.sessionId));
+
+  const sessions = [];
   for (const sid of sessionIds) {
     const sessionData = await getSession(sid);
     if (sessionData) {
@@ -101,16 +160,32 @@ export const storeRefreshToken = async (tokenId, userId) => {
   const redis = getRedisClient();
   const ttl = config.security.sessionTtlSeconds;
   await redis.setex(REDIS_KEYS.refreshToken(tokenId), ttl, userId.toString());
+  await AuthRefreshToken.findOneAndUpdate(
+    { jti: tokenId },
+    {
+      jti: tokenId,
+      userId,
+      expiresAt: sessionExpiryDate(),
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
 };
 
 export const isRefreshTokenValid = async (tokenId) => {
   const redis = getRedisClient();
-  return redis.exists(REDIS_KEYS.refreshToken(tokenId));
+  const inRedis = await redis.exists(REDIS_KEYS.refreshToken(tokenId));
+  if (inRedis) return true;
+  const row = await AuthRefreshToken.findOne({
+    jti: tokenId,
+    expiresAt: { $gt: new Date() },
+  }).lean();
+  return Boolean(row);
 };
 
 export const revokeRefreshToken = async (tokenId) => {
   const redis = getRedisClient();
   await redis.del(REDIS_KEYS.refreshToken(tokenId));
+  await AuthRefreshToken.deleteOne({ jti: tokenId });
 };
 
 export const storeOtp = async (email, otp) => {

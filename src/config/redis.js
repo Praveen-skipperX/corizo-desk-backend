@@ -44,6 +44,11 @@ class MemoryRedis {
     return this.data.has(key) ? this.data.get(key) : null;
   }
 
+  async exists(key) {
+    this.#purge(key);
+    return this.data.has(key) || this.sets.has(key) ? 1 : 0;
+  }
+
   async set(key, value) {
     this.data.set(key, String(value));
     return 'OK';
