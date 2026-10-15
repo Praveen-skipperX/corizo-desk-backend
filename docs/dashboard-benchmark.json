@@ -1,0 +1,19 @@
+{
+  "source": "Isolated MongoDB; synthetic records; warm queries; no HTTP or cache; unchanged user/activity queries excluded",
+  "records": 10000,
+  "samples": 30,
+  "maxPoolSize": 5,
+  "metricParity": true,
+  "before": {
+    "leadOperations": 17,
+    "p50Ms": 310,
+    "p95Ms": 348.48,
+    "meanMs": 316.21
+  },
+  "after": {
+    "leadOperations": 8,
+    "p50Ms": 283.61,
+    "p95Ms": 303.38,
+    "meanMs": 280.77
+  }
+}

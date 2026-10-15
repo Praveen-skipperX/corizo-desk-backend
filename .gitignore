@@ -13,3 +13,8 @@ scripts/superadmin-credentials.local.txt
 .DS_Store
 .vscode/
 .idea/
+
+# Local verification artifacts
+.test-tmp/
+audit-results.json
+lint-results.json

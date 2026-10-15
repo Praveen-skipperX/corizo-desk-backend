@@ -7,6 +7,7 @@ export const connectDatabase = async () => {
     mongoose.set('strictQuery', true);
     await mongoose.connect(config.mongodbUri, {
       maxPoolSize: process.env.VERCEL ? 5 : 10,
+      autoIndex: config.env !== 'production',
       serverSelectionTimeoutMS: 8000,
       socketTimeoutMS: 45000,
     });

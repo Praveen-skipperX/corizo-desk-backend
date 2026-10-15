@@ -26,7 +26,6 @@ import {
   TRANSFER_STATUSES,
   ACTIVITY_ACTIONS,
   ENTITY_TYPES,
-  PRIORITY_ORDER,
   FOLLOW_UP_STATUSES,
 } from '../constants/index.js';
 import { logActivity } from '../services/auditService.js';
@@ -42,10 +41,9 @@ import { addEmailJob, addImportJob } from '../queues/index.js';
 import { normalizeCourseValue, buildCourseMatchFilter } from '../utils/customFields.js';
 import { dayBoundsFromInput, resolveLeadDate } from '../utils/leadDate.js';
 import { getFollowUpDayWindows } from '../utils/dateUtils.js';
+import { assertSafeQuery } from '../utils/inputSecurity.js';
 import { isAdminRemarksEnabled } from '../services/appSettingsService.js';
 import ExcelJS from 'exceljs';
-import path from 'path';
-import fs from 'fs/promises';
 
 const CLOSED_STATUSES = [
   LEAD_STATUSES.CLOSED,
@@ -131,6 +129,18 @@ const populateLead = (query) =>
     .populate('assignedTo', 'name email phone')
     .populate('createdBy', 'name email');
 
+const validateAssignee = async (req, assignedTo, departmentId) => {
+  if (!assignedTo) return;
+  if (!req.permissionKeys?.has('leads.assign') && String(assignedTo) !== String(req.user._id)) {
+    throw new AppError('Insufficient assignment permissions', 403, 'FORBIDDEN');
+  }
+  const assignee = await User.findById(assignedTo).select('department isActive deletedAt');
+  if (!assignee?.isActive || assignee.deletedAt) throw new AppError('Invalid assignee', 400);
+  if (req.user.role !== ROLES.SUPER_ADMIN && String(assignee.department) !== String(departmentId)) {
+    throw new AppError('Can only assign within your department', 403, 'FORBIDDEN');
+  }
+};
+
 export const createLead = asyncHandler(async (req, res) => {
   const data = req.body;
   let departmentId = req.user.role === ROLES.ADMIN || req.user.role === ROLES.EMPLOYEE
@@ -139,6 +149,7 @@ export const createLead = asyncHandler(async (req, res) => {
 
   departmentId = await resolveDepartmentId(Department, departmentId);
   if (!departmentId) throw new AppError('No active department available. Create one or contact support.', 400);
+  await validateAssignee(req, data.assignedTo, departmentId);
 
   const creatorRemark = data.creatorRemark?.trim();
   if (!creatorRemark) {
@@ -296,15 +307,19 @@ export const listLeads = asyncHandler(async (req, res) => {
     connectorId,
   }, req.user);
 
+  // Reapply mandatory ACL as a conjunction: user filters must never replace it.
+  const scopedFilter = mergeLeadScope(req.user, filter);
   const skip = (pageNum - 1) * pageLimit;
   const [leads, total] = await Promise.all([
     populateLead(
-      Lead.find(filter)
+      Lead.find(scopedFilter)
+        .select('-sourceDetails.rawPayload')
         .sort(parseSort(sortBy || 'createdAt', sortOrder || 'desc'))
         .skip(skip)
         .limit(pageLimit)
+        .lean()
     ),
-    Lead.countDocuments(filter),
+    Lead.countDocuments(scopedFilter),
   ]);
 
   paginatedResponse(res, await leads, buildPagination(pageNum, pageLimit, total));
@@ -352,6 +367,10 @@ export const updateLead = asyncHandler(async (req, res) => {
   };
 
   const { dealAmount, dealNotes, closureDate, adminRemark, creatorRemark, ...updateData } = req.body;
+  if (updateData.assignedTo && String(updateData.assignedTo) !== String(lead.assignedTo)) {
+    if (!req.permissionKeys?.has('leads.assign')) throw new AppError('Insufficient assignment permissions', 403, 'FORBIDDEN');
+    await validateAssignee(req, updateData.assignedTo, lead.department);
+  }
 
   if (
     adminRemark?.trim()
@@ -629,6 +648,9 @@ export const bulkSoftDeleteLeads = asyncHandler(async (req, res) => {
   assertCanDeleteLeads(req.user);
   const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter(Boolean) : [];
   if (!ids.length) throw new AppError('Select at least one lead to delete', 400);
+  if (ids.length > 500 || ids.some((id) => typeof id !== 'string' || !/^[a-f\d]{24}$/i.test(id))) {
+    throw new AppError('Provide at most 500 valid lead IDs', 400, 'INVALID_QUERY');
+  }
 
   const filter = mergeLeadScope(req.user, { _id: { $in: ids }, isDeleted: false });
   const result = await Lead.updateMany(filter, {
@@ -651,6 +673,7 @@ export const bulkSoftDeleteLeads = asyncHandler(async (req, res) => {
 
 export const softDeleteAllLeads = asyncHandler(async (req, res) => {
   assertCanDeleteLeads(req.user);
+  if (req.body?.filters) assertSafeQuery(req.body.filters);
   if (req.body?.confirm !== true && req.body?.confirm !== 'DELETE') {
     throw new AppError('Confirmation required to delete all matching leads', 400);
   }
@@ -901,27 +924,42 @@ export const getFollowUpDashboard = asyncHandler(async (req, res) => {
     ...req.leadFilter,
   };
 
-  const sortByPriorityAndTime = (items) =>
-    items.sort((a, b) => {
-      const priorityDiff = (PRIORITY_ORDER[a.priority] || 99) - (PRIORITY_ORDER[b.priority] || 99);
-      if (priorityDiff !== 0) return priorityDiff;
-      return new Date(a.nextFollowUpDate) - new Date(b.nextFollowUpDate);
-    });
-
-  const [today, tomorrow, overdue] = await Promise.all([
-    populateLead(Lead.find({ ...baseFilter, nextFollowUpDate: { $gte: todayStart, $lte: todayEnd } })),
-    populateLead(Lead.find({ ...baseFilter, nextFollowUpDate: { $gte: tomorrowStart, $lte: tomorrowEnd } })),
-    populateLead(Lead.find({
-      ...baseFilter,
-      nextFollowUpDate: { $lt: todayStart },
-    })),
-  ]);
-
-  successResponse(res, {
-    today: sortByPriorityAndTime(await today),
-    tomorrow: sortByPriorityAndTime(await tomorrow),
-    overdue: sortByPriorityAndTime(await overdue),
-  });
+  const section = req.query.section;
+  if (section && !['today', 'tomorrow', 'overdue'].includes(section)) throw new AppError('Invalid follow-up section', 400);
+  const page = Number(req.query.page || 1);
+  const limit = Math.min(Number(req.query.limit || 10), 100);
+  const windows = {
+    today: { $gte: todayStart, $lte: todayEnd },
+    tomorrow: { $gte: tomorrowStart, $lte: tomorrowEnd },
+    overdue: { $lt: todayStart },
+  };
+  const response = { pagination: {} };
+  await Promise.all(Object.entries(windows).map(async ([key, range]) => {
+    const filter = { ...baseFilter, nextFollowUpDate: range };
+    if (req.query.search) applyLeadQueryFilters(filter, { search: req.query.search }, req.user);
+    const scoped = mergeLeadScope(req.user, filter);
+    const total = await Lead.countDocuments(scoped).maxTimeMS(15000);
+    response.pagination[key] = buildPagination(page, limit, total);
+    if (section && section !== key) return;
+    // Existing business priority: red, yellow, green; sort before paging.
+    const rows = await Lead.aggregate([
+      { $match: scoped },
+      { $addFields: { priorityRank: { $switch: { branches: [
+        { case: { $eq: ['$priority', 'red'] }, then: 1 },
+        { case: { $eq: ['$priority', 'yellow'] }, then: 2 },
+        { case: { $eq: ['$priority', 'green'] }, then: 3 },
+      ], default: 99 } } } },
+      { $sort: { priorityRank: 1, nextFollowUpDate: 1, _id: 1 } },
+      { $skip: (page - 1) * limit }, { $limit: limit },
+      { $project: { priorityRank: 0 } },
+    ]).option({ maxTimeMS: 15000 });
+    response[key] = await Lead.populate(rows, [
+      { path: 'department', select: 'name code' },
+      { path: 'assignedTo', select: 'name email phone' },
+      { path: 'createdBy', select: 'name email' },
+    ]);
+  }));
+  successResponse(res, response);
 });
 
 export const trackCommunication = asyncHandler(async (req, res) => {

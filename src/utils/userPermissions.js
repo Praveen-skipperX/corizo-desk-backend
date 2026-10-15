@@ -1,6 +1,7 @@
 import { AppError } from '../utils/apiResponse.js';
 import { ROLES } from '../constants/index.js';
 import { Lead, ActivityLog } from '../models/index.js';
+import { escapeRegex } from './inputSecurity.js';
 
 export const canManageUser = (manager, target) => {
   if (!target || target.role === ROLES.SUPER_ADMIN) return false;
@@ -27,6 +28,7 @@ export const assertCanManageUser = (manager, target) => {
 
 export const buildUserListFilter = (user, query = {}) => {
   const filter = { role: { $ne: ROLES.SUPER_ADMIN }, deletedAt: null };
+  if (![ROLES.SUPER_ADMIN, ROLES.ADMIN].includes(user.role)) return { _id: user._id, deletedAt: null };
 
   if (user.role === ROLES.SUPER_ADMIN) {
     filter.createdBy = user._id;
@@ -44,8 +46,8 @@ export const buildUserListFilter = (user, query = {}) => {
 
   if (query.search) {
     filter.$or = [
-      { name: { $regex: query.search, $options: 'i' } },
-      { email: { $regex: query.search, $options: 'i' } },
+      { name: { $regex: escapeRegex(query.search), $options: 'i' } },
+      { email: { $regex: escapeRegex(query.search), $options: 'i' } },
     ];
   }
 

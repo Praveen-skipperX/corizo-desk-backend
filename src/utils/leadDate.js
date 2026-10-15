@@ -34,7 +34,7 @@ export function parseSheetDate(value) {
   }
 
   // MM/DD/YYYY (US sheets) — when middle part > 12 it can't be DD/MM
-  const us = raw.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
+  const us = raw.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})$/);
   if (us) {
     const a = Number(us[1]);
     const b = Number(us[2]);

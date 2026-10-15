@@ -1,5 +1,6 @@
 import { ActivityLog } from '../models/index.js';
 import { ACTIVITY_ACTIONS, ENTITY_TYPES } from '../constants/index.js';
+import { redactAuditValues } from '../utils/inputSecurity.js';
 
 export const logActivity = async ({
   user,
@@ -20,11 +21,11 @@ export const logActivity = async ({
     action,
     entityType,
     entityId: entityId?.toString(),
-    previousValues,
-    updatedValues,
+    previousValues: redactAuditValues(previousValues),
+    updatedValues: redactAuditValues(updatedValues),
     ipAddress,
     deviceInfo,
-    metadata,
+    metadata: redactAuditValues(metadata),
   });
   return log;
 };

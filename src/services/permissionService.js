@@ -15,17 +15,17 @@ import logger from '../utils/logger.js';
 export const getPermissionsForRoleSlug = async (roleSlug) => {
   if (!roleSlug) return [];
 
-  const role = await Role.findOne({ slug: roleSlug, isActive: true }).lean();
+  const role = await Role.findOne({ slug: roleSlug }).lean();
   if (!role) {
-    // Fallback: empty until seeded — callers may use legacy role checks during migration
-    return [];
+    return (DEFAULT_ROLE_PERMISSIONS[roleSlug] || []).map((grant) => ({ ...grant }));
   }
+  if (!role.isActive) return [];
 
   const grants = await RolePermission.find({ role: role._id })
     .select('permissionKey scope')
     .lean();
 
-  return grants.map((g) => ({ key: g.permissionKey, scope: g.scope }));
+  return grants.filter((g) => g.scope !== 'none').map((g) => ({ key: g.permissionKey, scope: g.scope }));
 };
 
 export const getPermissionKeysForRoleSlug = async (roleSlug) => {

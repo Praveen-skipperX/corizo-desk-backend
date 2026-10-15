@@ -171,6 +171,7 @@ export function sanitizeCustomFieldKey(input) {
 
 export function sanitizeCustomFieldLabel(input, fallback = 'Field') {
   const label = String(input ?? fallback)
+  // eslint-disable-next-line no-control-regex -- Reject control characters in exported or imported text.
     .replace(/[\u0000-\u001F\u007F]/g, '')
     .trim()
     .slice(0, CUSTOM_FIELD_LIMITS.maxLabelLength);
@@ -179,6 +180,7 @@ export function sanitizeCustomFieldLabel(input, fallback = 'Field') {
 
 export function sanitizeCustomFieldValue(input, { key, label } = {}) {
   let value = String(input ?? '')
+  // eslint-disable-next-line no-control-regex -- Reject control characters in exported or imported text.
     .replace(/[\u0000-\u001F\u007F]/g, '')
     .trim()
     .slice(0, CUSTOM_FIELD_LIMITS.maxValueLength);

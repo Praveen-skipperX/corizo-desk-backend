@@ -117,6 +117,8 @@ const connectorSchema = new mongoose.Schema(
     lastSuccessAt: Date,
     lastErrorAt: Date,
     lastErrorMessage: String,
+    syncLeaseOwner: { type: String, select: false },
+    syncLeaseUntil: { type: Date, select: false },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     isDeleted: { type: Boolean, default: false, index: true },
   },

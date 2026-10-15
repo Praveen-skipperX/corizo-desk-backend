@@ -86,11 +86,19 @@ export const touchSession = async (sessionId) => {
   if (parsed.userId) {
     await redis.expire(REDIS_KEYS.userSessions(parsed.userId), config.security.sessionTtlSeconds);
   }
-  await persistSessionMongo(sessionId, parsed);
+  const updated = await AuthSession.updateOne({ sessionId, expiresAt: { $gt: new Date() } }, {
+    $set: { payload: parsed, expiresAt: sessionExpiryDate() },
+  });
+  if (!updated.matchedCount) {
+    await redis.del(key);
+    return null;
+  }
   return parsed;
 };
 
 export const getSession = async (sessionId) => {
+  // Instance-local memory cannot observe another instance's logout/revocation.
+  if (!hasHostedRedis()) return readSessionMongo(sessionId);
   const redis = getRedisClient();
   const data = await redis.get(REDIS_KEYS.session(sessionId));
   if (data) return JSON.parse(data);
@@ -188,6 +196,15 @@ export const revokeRefreshToken = async (tokenId) => {
   const redis = getRedisClient();
   await redis.del(REDIS_KEYS.refreshToken(tokenId));
   await AuthRefreshToken.deleteOne({ jti: tokenId });
+};
+
+/** Mongo is authoritative: one atomic deletion prevents concurrent refresh replay. */
+export const consumeRefreshToken = async (tokenId, userId) => {
+  const row = await AuthRefreshToken.findOneAndDelete({
+    jti: tokenId, userId, expiresAt: { $gt: new Date() },
+  });
+  await getRedisClient().del(REDIS_KEYS.refreshToken(tokenId));
+  return Boolean(row);
 };
 
 export const storeOtp = async (email, otp) => {
@@ -323,17 +340,9 @@ export const getCachedDashboardStats = async (scope, id) => {
   return null;
 };
 
-export const invalidateDashboardCache = async (scope, id) => {
-  const redis = getRedisClient();
-  const key = REDIS_KEYS.dashboardStats(scope, id);
-  await redis.del(key);
-  if (!hasHostedRedis()) {
-    try {
-      await AppCache.deleteOne({ key });
-    } catch {
-      /* ignore */
-    }
-  }
+export const invalidateDashboardCache = async () => {
+  // Every lead mutation affects global, department, employee and sheet ACL snapshots.
+  await invalidateAllDashboardCaches();
 };
 
 /** Clear all role/scope dashboard snapshots (lead deletes, imports, etc.). */

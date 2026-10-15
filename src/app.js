@@ -9,6 +9,7 @@ import routes from './routes/index.js';
 import { requestContext } from './middleware/validate.js';
 import { apiRateLimiter } from './middleware/rateLimiter.js';
 import { notFound, errorHandler } from './middleware/errorHandler.js';
+import { inputSecurity } from './middleware/inputSecurity.js';
 
 const app = express();
 
@@ -33,11 +34,13 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
   optionsSuccessStatus: 204,
 }));
-app.options('*', cors());
 app.use(compression());
-app.use(morgan(config.env === 'production' ? 'combined' : 'dev'));
+// Log paths and correlation IDs without query strings containing contact data.
+morgan.token('path', (req) => req.path);
+morgan.token('request-id', (req) => req.requestId);
+app.use(morgan(':method :path :status :response-time ms :request-id'));
 app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: false, limit: '100kb' }));
 app.use(cookieParser());
 app.use(requestContext);
 app.use('/api', (_req, res, next) => {
@@ -45,7 +48,7 @@ app.use('/api', (_req, res, next) => {
   res.set('Pragma', 'no-cache');
   next();
 });
-app.use('/api', apiRateLimiter, routes);
+app.use('/api', inputSecurity, apiRateLimiter, routes);
 
 app.use(notFound);
 app.use(errorHandler);

@@ -5,33 +5,16 @@ import {
   ActivityLog,
   User,
 } from '../models/index.js';
-import { ROLES, LEAD_STATUSES, ACTIVITY_ACTIONS } from '../constants/index.js';
+import { ROLES, ACTIVITY_ACTIONS } from '../constants/index.js';
 import {
   getCachedDashboardStats,
   cacheDashboardStats,
 } from '../services/redisService.js';
 import { buildLeadScopeFilter } from '../utils/leadAccess.js';
 import { normalizeCourseValue } from '../utils/customFields.js';
-import { getFollowUpDayWindows } from '../utils/dateUtils.js';
-
-const OPEN_STATUSES = [
-  LEAD_STATUSES.NEW,
-  LEAD_STATUSES.ASSIGNED,
-  LEAD_STATUSES.ATTEMPTED,
-  LEAD_STATUSES.CONNECTED,
-  LEAD_STATUSES.INTERESTED,
-  LEAD_STATUSES.FOLLOW_UP,
-];
-
-const CLOSED_STATUSES = [
-  LEAD_STATUSES.CLOSED,
-  LEAD_STATUSES.NOT_INTERESTED,
-  LEAD_STATUSES.DUPLICATE,
-  LEAD_STATUSES.SPAM,
-];
-
-/** Sheet date (leadDate) when present, otherwise createdAt — for dashboard date stats. */
-const STATS_DATE_EXPR = { $ifNull: ['$leadDate', '$createdAt'] };
+import { queryDashboard } from '../utils/dashboardQueries.js';
+import { getFollowUpDayWindows, formatZonedDay } from '../utils/dateUtils.js';
+import { escapeRegex } from '../utils/inputSecurity.js';
 
 const mergeCourseCounts = (rows = []) => {
   const merged = new Map();
@@ -102,8 +85,9 @@ const formatActivityDescription = (activity) => {
 
 export const getDashboard = asyncHandler(async (req, res) => {
   const scope = req.user.role === ROLES.SUPER_ADMIN ? 'global' : req.user.role === ROLES.ADMIN ? 'department' : 'employee';
-  const scopeId = scope === 'global' ? 'all' : scope === 'department' ? (req.user.department._id || req.user.department).toString() : req.user._id.toString();
+  const baseScopeId = scope === 'global' ? 'all' : scope === 'department' ? (req.user.department?._id || req.user.department || 'none').toString() : req.user._id.toString();
 
+  const scopeId = `${baseScopeId}:${req.user._id}:${JSON.stringify(buildLeadScopeFilter(req.user))}:${formatZonedDay()}`;
   const cached = await getCachedDashboardStats(scope, scopeId);
   if (cached) return successResponse(res, cached);
 
@@ -111,7 +95,7 @@ export const getDashboard = asyncHandler(async (req, res) => {
   let activityFilter = {};
 
   if (req.user.role === ROLES.ADMIN) {
-    const deptId = req.user.department._id || req.user.department;
+    const deptId = req.user.department?._id || req.user.department;
     activityFilter.department = deptId;
   } else if (req.user.role === ROLES.EMPLOYEE) {
     activityFilter.user = req.user._id;
@@ -125,148 +109,19 @@ export const getDashboard = asyncHandler(async (req, res) => {
   const trendStart = new Date(todayStart);
   trendStart.setTime(trendStart.getTime() - 13 * 24 * 60 * 60 * 1000);
 
-  // Match follow-up list: overdue ignores closed leads; today counts open pipeline only.
-  const openFollowUpStatus = { $nin: CLOSED_STATUSES };
-
-  const statsDateInRange = (from, to) => ({
-    $expr: {
-      $and: [
-        { $gte: [STATS_DATE_EXPR, from] },
-        { $lte: [STATS_DATE_EXPR, to] },
-      ],
-    },
-  });
-
-  const followUpBase = {
-    ...leadFilter,
-    nextFollowUpDate: { $exists: true, $ne: null },
-    status: openFollowUpStatus,
-  };
-
-  const [
-    totalLeads,
-    openLeads,
-    closedWon,
-    closedLost,
-    statusDistribution,
-    priorityDistribution,
-    departmentDistribution,
-    todayFollowUps,
-    overdueFollowUps,
-    lockedAccounts,
-    recentActivitiesRaw,
-    todaysLeads,
-    weekLeads,
-    weekEnrollments,
-    sourceDistribution,
-    courseInterest,
-    courseEnrollments,
-    leadsByDayRaw,
-    enrollmentsByDayRaw,
-  ] = await Promise.all([
-    Lead.countDocuments(leadFilter),
-    Lead.countDocuments({ ...leadFilter, status: { $in: OPEN_STATUSES } }),
-    Lead.countDocuments({ ...leadFilter, status: LEAD_STATUSES.CLOSED }),
-    Lead.countDocuments({ ...leadFilter, status: LEAD_STATUSES.NOT_INTERESTED }),
-    Lead.aggregate([
-      { $match: leadFilter },
-      { $group: { _id: '$status', count: { $sum: 1 } } },
-    ]),
-    Lead.aggregate([
-      { $match: leadFilter },
-      { $group: { _id: '$priority', count: { $sum: 1 } } },
-    ]),
-    req.user.role === ROLES.SUPER_ADMIN
-      ? Lead.aggregate([
-          { $match: { isDeleted: false } },
-          { $group: { _id: '$department', count: { $sum: 1 } } },
-          { $lookup: { from: 'departments', localField: '_id', foreignField: '_id', as: 'dept' } },
-          { $unwind: '$dept' },
-          { $project: { name: '$dept.name', count: 1 } },
-        ])
-      : Promise.resolve([]),
-    Lead.countDocuments({
-      ...followUpBase,
-      nextFollowUpDate: { $gte: todayStart, $lte: todayEnd },
-    }),
-    Lead.countDocuments({
-      ...followUpBase,
-      nextFollowUpDate: { $lt: todayStart },
-    }),
+  const [aggregateRows, lockedAccounts, recentActivitiesRaw] = await Promise.all([
+    queryDashboard(Lead, leadFilter, { todayStart, todayEnd, weekStart, trendStart }, req.user.role === ROLES.SUPER_ADMIN),
     req.user.role === ROLES.SUPER_ADMIN ? User.countDocuments({ isLocked: true }) : Promise.resolve(0),
-    ActivityLog.find(activityFilter)
-      .sort({ createdAt: -1 })
-      .limit(5)
-      .populate('user', 'name email')
-      .populate('department', 'name'),
-    // Date cards / trends use sheet leadDate (fallback createdAt)
-    Lead.countDocuments({ ...leadFilter, ...statsDateInRange(todayStart, todayEnd) }),
-    Lead.countDocuments({ ...leadFilter, ...statsDateInRange(weekStart, todayEnd) }),
-    Lead.countDocuments({
-      ...leadFilter,
-      status: LEAD_STATUSES.CLOSED,
-      ...statsDateInRange(weekStart, todayEnd),
-    }),
-    Lead.aggregate([
-      { $match: leadFilter },
-      { $group: { _id: '$source', count: { $sum: 1 } } },
-      { $sort: { count: -1 } },
-    ]),
-    Lead.aggregate([
-      { $match: { ...leadFilter, course: { $exists: true, $nin: [null, ''] } } },
-      { $group: { _id: '$course', count: { $sum: 1 } } },
-      { $sort: { count: -1 } },
-    ]),
-    Lead.aggregate([
-      {
-        $match: {
-          ...leadFilter,
-          status: LEAD_STATUSES.CLOSED,
-          course: { $exists: true, $nin: [null, ''] },
-        },
-      },
-      { $group: { _id: '$course', count: { $sum: 1 } } },
-      { $sort: { count: -1 } },
-    ]),
-    Lead.aggregate([
-      { $match: { ...leadFilter, ...statsDateInRange(trendStart, todayEnd) } },
-      {
-        $group: {
-          _id: {
-            $dateToString: {
-              format: '%Y-%m-%d',
-              date: STATS_DATE_EXPR,
-              timezone: 'Asia/Kolkata',
-            },
-          },
-          count: { $sum: 1 },
-        },
-      },
-      { $sort: { _id: 1 } },
-    ]),
-    Lead.aggregate([
-      {
-        $match: {
-          ...leadFilter,
-          status: LEAD_STATUSES.CLOSED,
-          ...statsDateInRange(trendStart, todayEnd),
-        },
-      },
-      {
-        $group: {
-          _id: {
-            $dateToString: {
-              format: '%Y-%m-%d',
-              date: STATS_DATE_EXPR,
-              timezone: 'Asia/Kolkata',
-            },
-          },
-          count: { $sum: 1 },
-        },
-      },
-      { $sort: { _id: 1 } },
-    ]),
+    ActivityLog.find(activityFilter).sort({ createdAt: -1 }).limit(5)
+      .populate('user', 'name email').populate('department', 'name').lean(),
   ]);
+  const facets = aggregateRows;
+  const { totalLeads = 0, openLeads = 0, closedWon = 0, closedLost = 0,
+    todaysLeads = 0, weekLeads = 0, weekEnrollments = 0,
+    todayFollowUps = 0, overdueFollowUps = 0 } = facets.summary?.[0] || {};
+  const { statusDistribution = [], priorityDistribution = [], departmentDistribution = [],
+    sourceDistribution = [], courseInterest = [], courseEnrollments = [],
+    leadsByDayRaw = [], enrollmentsByDayRaw = [] } = facets;
 
   const closedLeads = closedWon + closedLost;
   const conversionRate = totalLeads > 0
@@ -275,15 +130,14 @@ export const getDashboard = asyncHandler(async (req, res) => {
 
   const leadsByDayMap = new Map(leadsByDayRaw.map((r) => [r._id, r.count]));
   const enrollmentsByDayMap = new Map(enrollmentsByDayRaw.map((r) => [r._id, r.count]));
-  const pad2 = (n) => String(n).padStart(2, '0');
   const leadsTrend = [];
   for (let i = 13; i >= 0; i -= 1) {
     const d = new Date(todayStart);
-    d.setDate(d.getDate() - i);
-    const key = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    d.setTime(d.getTime() - i * 86400000);
+    const key = formatZonedDay(d);
     leadsTrend.push({
       date: key,
-      name: d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }),
+      name: d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', timeZone: 'Asia/Kolkata' }),
       leads: leadsByDayMap.get(key) || 0,
       enrollments: enrollmentsByDayMap.get(key) || 0,
     });
@@ -350,7 +204,9 @@ export const getActivityLogs = asyncHandler(async (req, res) => {
 
   if (action) filter.action = action;
   if (entityType) filter.entityType = entityType;
-  if (userId) filter.user = userId;
+  if (userId) {
+    filter.$and = [...(filter.$and || []), { user: userId }];
+  }
   if (userRole) filter.userRole = userRole;
   if (department && req.user.role === ROLES.SUPER_ADMIN) filter.department = department;
   if (leadId) filter['metadata.leadId'] = leadId;
@@ -370,9 +226,9 @@ export const getActivityLogs = asyncHandler(async (req, res) => {
 
   if (search) {
     filter.$or = [
-      { userName: { $regex: search, $options: 'i' } },
-      { 'metadata.leadId': { $regex: search, $options: 'i' } },
-      { entityId: { $regex: search, $options: 'i' } },
+      { userName: { $regex: escapeRegex(search), $options: 'i' } },
+      { 'metadata.leadId': { $regex: escapeRegex(search), $options: 'i' } },
+      { entityId: { $regex: escapeRegex(search), $options: 'i' } },
     ];
   }
 
@@ -412,12 +268,12 @@ export const globalSearch = asyncHandler(async (req, res) => {
     req.user.role !== ROLES.EMPLOYEE
       ? User.find({
           $or: [
-            { name: { $regex: q, $options: 'i' } },
-            { email: { $regex: q, $options: 'i' } },
+            { name: { $regex: escapeRegex(q), $options: 'i' } },
+            { email: { $regex: escapeRegex(q), $options: 'i' } },
           ],
           isActive: true,
           role: { $ne: ROLES.SUPER_ADMIN },
-          ...(req.user.role === ROLES.ADMIN ? { department: req.user.department._id || req.user.department } : {}),
+          ...(req.user.role === ROLES.ADMIN ? { department: req.user.department?._id || req.user.department } : {}),
         })
           .select('name email role')
           .limit(5)

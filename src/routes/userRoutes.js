@@ -18,7 +18,7 @@ import {
   deleteDepartment,
   getLockedAccounts,
 } from '../controllers/userController.js';
-import { authenticate, authorize } from '../middleware/auth.js';
+import { authenticate, authorize, requirePermission } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
 import {
   createUserSchema,
@@ -39,16 +39,17 @@ router.route('/departments')
   .get(getDepartments)
   .post(authorize(ROLES.SUPER_ADMIN), validate(createDepartmentSchema), createDepartment);
 
-router.patch('/departments/:id', authorize(ROLES.SUPER_ADMIN), updateDepartment);
+router.patch('/departments/:id', authorize(ROLES.SUPER_ADMIN), requirePermission('departments.edit'), updateDepartment);
 router.get('/departments/:id', authorize(ROLES.SUPER_ADMIN), getDepartmentById);
 router.post('/departments/:id/deactivate', authorize(ROLES.SUPER_ADMIN), deactivateDepartment);
 router.post('/departments/:id/reactivate', authorize(ROLES.SUPER_ADMIN), reactivateDepartment);
-router.delete('/departments/:id', authorize(ROLES.SUPER_ADMIN), deleteDepartment);
+router.delete('/departments/:id', authorize(ROLES.SUPER_ADMIN), requirePermission('departments.delete'), deleteDepartment);
 
 router.route('/')
   .get(validate(paginationSchema), getUsers)
   .post(
     authorize(ROLES.SUPER_ADMIN, ROLES.ADMIN),
+    requirePermission('users.create'),
     validate(createUserSchema),
     createUser
   );
@@ -57,18 +58,19 @@ router.route('/:id')
   .get(getUserById)
   .patch(
     authorize(ROLES.SUPER_ADMIN, ROLES.ADMIN),
+    requirePermission('users.edit'),
     validate(updateUserSchema),
     updateUser
   )
-  .delete(authorize(ROLES.SUPER_ADMIN, ROLES.ADMIN), deleteUser);
+  .delete(authorize(ROLES.SUPER_ADMIN, ROLES.ADMIN), requirePermission('users.delete'), deleteUser);
 
-router.post('/:id/deactivate', authorize(ROLES.SUPER_ADMIN, ROLES.ADMIN), deactivateUser);
-router.post('/:id/reactivate', authorize(ROLES.SUPER_ADMIN, ROLES.ADMIN), reactivateUser);
-router.post('/:id/unlock', authorize(ROLES.SUPER_ADMIN, ROLES.ADMIN), unlockUserAccount);
+router.post('/:id/deactivate', authorize(ROLES.SUPER_ADMIN, ROLES.ADMIN), requirePermission('users.delete'), deactivateUser);
+router.post('/:id/reactivate', authorize(ROLES.SUPER_ADMIN, ROLES.ADMIN), requirePermission('users.edit'), reactivateUser);
+router.post('/:id/unlock', authorize(ROLES.SUPER_ADMIN, ROLES.ADMIN), requirePermission('users.unlock'), unlockUserAccount);
 router.post(
   '/:id/reset-password',
   authorize(ROLES.SUPER_ADMIN, ROLES.ADMIN),
-  validate(resetUserPasswordSchema),
+  requirePermission('users.reset_password'), validate(resetUserPasswordSchema),
   resetUserPassword
 );
 

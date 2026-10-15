@@ -1,6 +1,5 @@
 import { AppError } from '../utils/apiResponse.js';
 import { getPermissionsForRoleSlug } from '../services/permissionService.js';
-import { DEFAULT_ROLE_PERMISSIONS } from '../constants/permissions.js';
 
 /**
  * Attach req.permissions = [{ key, scope }] for the authenticated user.
@@ -14,14 +13,7 @@ export const loadPermissions = async (req, res, next) => {
       return next();
     }
 
-    let permissions = await getPermissionsForRoleSlug(req.user.role);
-
-    if (!permissions.length && DEFAULT_ROLE_PERMISSIONS[req.user.role]) {
-      permissions = DEFAULT_ROLE_PERMISSIONS[req.user.role].map((g) => ({
-        key: g.key,
-        scope: g.scope,
-      }));
-    }
+    const permissions = await getPermissionsForRoleSlug(req.user.role);
 
     req.permissions = permissions;
     req.permissionKeys = new Set(permissions.map((p) => p.key));

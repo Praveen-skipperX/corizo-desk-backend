@@ -49,7 +49,7 @@ export const canAccessLead = (user, lead) => {
   if (user.role === ROLES.ADMIN) {
     const adminDept = user.department?._id?.toString() || user.department?.toString();
     const leadDept = lead.department?._id?.toString() || lead.department?.toString();
-    return adminDept === leadDept;
+    return Boolean(adminDept && leadDept && adminDept === leadDept);
   }
 
   if (user.role === ROLES.EMPLOYEE) {

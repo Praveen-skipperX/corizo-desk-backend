@@ -5,7 +5,7 @@ const authSessionSchema = new mongoose.Schema(
     sessionId: { type: String, required: true, unique: true, index: true },
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     payload: { type: mongoose.Schema.Types.Mixed, default: {} },
-    expiresAt: { type: Date, required: true, index: true },
+    expiresAt: { type: Date, required: true },
   },
   { timestamps: true }
 );

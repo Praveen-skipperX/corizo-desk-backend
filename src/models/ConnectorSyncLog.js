@@ -66,6 +66,7 @@ const connectorSyncLogSchema = new mongoose.Schema(
     errors: { type: [syncErrorSchema], default: [] },
     previewPayload: mongoose.Schema.Types.Mixed,
     previewExpiresAt: Date,
+    previewConsumedAt: Date,
     jobId: String,
   },
   { timestamps: true }

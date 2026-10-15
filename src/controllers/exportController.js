@@ -1,3 +1,4 @@
+import { csvCell } from '../utils/inputSecurity.js';
 import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 import { AppError, asyncHandler, successResponse } from '../utils/apiResponse.js';
@@ -82,12 +83,16 @@ const buildLeadFilter = (user, query) => {
   return filter;
 };
 
-const fetchExportData = async (user, query, fields) => {
+const MAX_EXPORT_ROWS = 5000;
+const fetchExportData = async (user, query, fields, limit = MAX_EXPORT_ROWS + 1) => {
   const filter = buildLeadFilter(user, query);
   const leads = await Lead.find(filter)
     .populate('department assignedTo createdBy', 'name email')
-    .sort({ createdAt: -1 })
+    .sort({ createdAt: -1, _id: -1 })
+    .limit(limit)
+    .maxTimeMS(15000)
     .lean();
+  if (leads.length > MAX_EXPORT_ROWS) throw new AppError('Export exceeds 5000 records. Narrow the filters.', 422, 'EXPORT_TOO_LARGE');
 
   const needsRemarks = fields.includes('creatorRemark') || fields.includes('adminRemark');
   let remarkMap = {};
@@ -144,7 +149,7 @@ const sendCsv = (res, rows, fields, filename) => {
   const headers = fields.map((f) => LEAD_EXPORT_FIELDS[f].label);
   let csv = `${headers.map((h) => `"${h}"`).join(',')}\n`;
   rows.forEach((row) => {
-    csv += `${fields.map((f) => `"${String(row[f] ?? '').replace(/"/g, '""')}"`).join(',')}\n`;
+    csv += `${fields.map((f) => csvCell(row[f])).join(',')}\n`;
   });
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', `attachment; filename=${filename}.csv`);
@@ -200,10 +205,13 @@ export const getExportConfig = asyncHandler(async (_req, res) => {
 
 export const previewExport = asyncHandler(async (req, res) => {
   const fields = parseFields(req.query.fields, req.query.preset);
-  const rows = await fetchExportData(req.user, req.query, fields);
+  const [recordCount, rows] = await Promise.all([
+    Lead.countDocuments(buildLeadFilter(req.user, req.query)).maxTimeMS(15000),
+    fetchExportData(req.user, req.query, fields, 3),
+  ]);
 
   successResponse(res, {
-    recordCount: rows.length,
+    recordCount,
     fields: fields.map((f) => ({ key: f, label: LEAD_EXPORT_FIELDS[f].label })),
     format: req.query.format || 'csv',
     requiresVerification: hasSensitiveFields(fields),

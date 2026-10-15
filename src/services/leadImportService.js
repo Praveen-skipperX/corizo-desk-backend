@@ -1,4 +1,7 @@
 import { getAdapter } from '../connectors/index.js';
+import { randomUUID } from 'node:crypto';
+import { AppError } from '../utils/apiResponse.js';
+import { assertCompleteReplacement, replacementRetirementFilter } from '../utils/syncSafety.js';
 import { buildDuplicateIndex, findDuplicateInIndex, buildDuplicateHash } from './duplicateDetectionService.js';
 import {
   Lead,
@@ -192,7 +195,7 @@ const chunk = (arr, size) => {
  * Commit import: insert new leads; optionally update duplicates; full replace for SA.
  * Supports live progress via syncLog.processedCount / totalToProcess.
  */
-export const commitConnectorImport = async ({
+const commitConnectorImportUnlocked = async ({
   connector,
   user,
   previewId,
@@ -222,16 +225,24 @@ export const commitConnectorImport = async ({
   let previewLog = null;
 
   if (previewId) {
-    previewLog = await ConnectorSyncLog.findById(previewId);
-    if (!previewLog || String(previewLog.connector) !== String(connector._id)) {
+    previewLog = await ConnectorSyncLog.findOneAndUpdate({
+      _id: previewId, connector: connector._id, mode: 'preview', status: 'completed',
+      previewExpiresAt: { $gt: new Date() },
+      previewConsumedAt: { $exists: false },
+    }, { $set: { previewConsumedAt: new Date() } }, { new: true });
+    if (!previewLog) {
       throw new Error('Invalid or expired preview');
+    }
+    if (previewLog.newCount > (previewLog.previewPayload?.newRows?.length || 0)
+      || previewLog.duplicateCount > (previewLog.previewPayload?.duplicateRows?.length || 0)) {
+      throw new Error('Preview exceeds the import limit; use a fresh synchronization');
     }
     classified = {
       rowsFound: previewLog.rowsFound,
       newRows: previewLog.previewPayload?.newRows || [],
       duplicateRows: previewLog.previewPayload?.duplicateRows || [],
-      invalidRows: [],
-      skippedRows: [],
+      invalidRows: Array.from({ length: previewLog.invalidCount || 0 }),
+      skippedRows: Array.from({ length: previewLog.skippedCount || 0 }),
     };
   } else {
     const { rows } = await adapter.fetchRows(connector);
@@ -378,16 +389,6 @@ export const commitConnectorImport = async ({
   try {
     await assertSyncStillActive(syncLog._id);
 
-    if (syncMode === SYNC_MODES.FULL_REPLACE) {
-      await Lead.updateMany(
-        {
-          isDeleted: false,
-          'importMeta.connectorId': String(connector._id),
-        },
-        { $set: { isDeleted: true } }
-      );
-    }
-
     // --- Batched inserts (avoid per-row generateLeadId + create + timeline) ---
     const newChunks = chunk(classified.newRows, INSERT_BATCH);
     for (const batch of newChunks) {
@@ -422,6 +423,10 @@ export const commitConnectorImport = async ({
 
         const inserted = await Lead.insertMany(docs, { ordered: false });
         importedCount += inserted.length;
+        if (inserted.length < docs.length) {
+          failedCount += docs.length - inserted.length;
+          errors.push({ message: 'Some import rows failed schema validation', row: 'batch-insert' });
+        }
 
         if (inserted.length) {
           const timelineDocs = inserted.map((lead) => ({
@@ -551,6 +556,14 @@ export const commitConnectorImport = async ({
 
     await bumpProgress(true);
 
+    // Retire absent records only after replacement has succeeded in full.
+    // A failed/cancelled/empty/invalid import always leaves prior records active.
+    if (syncMode === SYNC_MODES.FULL_REPLACE) {
+      assertCompleteReplacement({ failedCount, invalidCount: classified.invalidRows?.length, skippedCount: classified.skippedRows?.length, rowsFound });
+      await assertSyncStillActive(syncLog._id);
+      await Lead.updateMany(replacementRetirementFilter(connector._id, startedAt), { $set: { isDeleted: true } });
+    }
+
     const completedAt = new Date();
     const stillActive = await ConnectorSyncLog.findOneAndUpdate(
       { _id: syncLog._id, status: { $in: ['pending', 'running'] } },
@@ -635,6 +648,26 @@ export const commitConnectorImport = async ({
       'health.apiStatus': CONNECTOR_HEALTH.API.ERROR,
     });
     throw error;
+  }
+};
+
+/** Durable lease prevents overlapping manual/scheduled imports across instances. */
+export const commitConnectorImport = async (options) => {
+  const owner = randomUUID();
+  const acquired = await Connector.findOneAndUpdate({
+    _id: options.connector._id, isDeleted: false,
+    $or: [{ syncLeaseUntil: { $lte: new Date() } }, { syncLeaseUntil: { $exists: false } }, { syncLeaseUntil: null }],
+  }, { $set: { syncLeaseOwner: owner, syncLeaseUntil: new Date(Date.now() + 330000) } }, { new: true });
+  if (!acquired) throw new AppError('A synchronization is already running for this connector', 409, 'SYNC_IN_PROGRESS');
+  const heartbeat = setInterval(() => {
+    Connector.updateOne({ _id: options.connector._id, syncLeaseOwner: owner }, { $set: { syncLeaseUntil: new Date(Date.now() + 330000) } })
+      .catch((error) => logger.error('Sync lease renewal failed', { error: error.message }));
+  }, 60000);
+  heartbeat.unref?.();
+  try { return await commitConnectorImportUnlocked(options); }
+  finally {
+    clearInterval(heartbeat);
+    await Connector.updateOne({ _id: options.connector._id, syncLeaseOwner: owner }, { $unset: { syncLeaseOwner: '', syncLeaseUntil: '' } });
   }
 };
 

@@ -1,3 +1,4 @@
+import { escapeRegex } from '../utils/inputSecurity.js';
 import config from '../config/index.js';
 import { AppError, asyncHandler, successResponse, paginatedResponse } from '../utils/apiResponse.js';
 import { buildPagination, parseSort, resolveDepartmentId } from '../utils/helpers.js';
@@ -124,7 +125,7 @@ export const listConnectors = asyncHandler(async (req, res) => {
   const filter = { ...buildConnectorScope(req.user) };
   if (type) filter.type = type;
   if (status) filter.status = status;
-  if (search) filter.name = { $regex: search, $options: 'i' };
+  if (search) filter.name = { $regex: escapeRegex(search), $options: 'i' };
 
   const skip = (Number(page) - 1) * Number(limit);
   const [rows, total] = await Promise.all([

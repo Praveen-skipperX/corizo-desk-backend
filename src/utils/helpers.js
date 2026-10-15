@@ -1,7 +1,10 @@
+import { randomInt } from 'node:crypto';
+import { SORT_FIELDS } from './inputSecurity.js';
+import { AppError } from './apiResponse.js';
+
 export const getClientIp = (req) => {
   return (
-    req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
-    req.headers['x-real-ip'] ||
+    req.ip ||
     req.connection?.remoteAddress ||
     req.socket?.remoteAddress ||
     'unknown'
@@ -75,7 +78,7 @@ export const generateLeadIds = async (Lead, count) => {
 };
 
 export const generateOtp = () => {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+  return randomInt(100000, 1000000).toString();
 };
 
 export const sanitizeUser = (user) => {
@@ -96,9 +99,11 @@ export const buildPagination = (page = 1, limit = 20, total = 0) => ({
   hasPrev: page > 1,
 });
 
-export const parseSort = (sortBy = 'createdAt', sortOrder = 'desc') => ({
-  [sortBy]: sortOrder === 'asc' ? 1 : -1,
-});
+export const parseSort = (sortBy = 'createdAt', sortOrder = 'desc') => {
+  if (!SORT_FIELDS.has(sortBy)) throw new AppError('Invalid sort field', 400, 'INVALID_QUERY');
+  const direction = sortOrder === 'asc' ? 1 : -1;
+  return { [sortBy]: direction, _id: direction };
+};
 
 /** When department UI is hidden, fall back to the first active department. */
 export const resolveDepartmentId = async (Department, preferredId) => {

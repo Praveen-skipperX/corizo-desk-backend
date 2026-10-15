@@ -6,7 +6,6 @@ import config from '../config/index.js';
 import { AppError, asyncHandler, successResponse } from '../utils/apiResponse.js';
 import { generateOtp, sanitizeUser } from '../utils/helpers.js';
 import { getPermissionsForRoleSlug } from '../services/permissionService.js';
-import { DEFAULT_ROLE_PERMISSIONS } from '../constants/permissions.js';
 import { validatePasswordStrength, assertPasswordsMatch } from '../utils/password.js';
 import { decryptSecret, encryptSecret } from '../utils/encryption.js';
 import {
@@ -39,7 +38,7 @@ import {
   getSession,
   storeRefreshToken,
   verifyRefreshToken,
-  isRefreshTokenValid,
+  consumeRefreshToken,
   revokeRefreshToken,
   deleteSession,
 } from '../services/redisService.js';
@@ -63,14 +62,7 @@ const refreshCookieOptions = () => {
 };
 
 const resolvePermissionsForUser = async (user) => {
-  let permissions = await getPermissionsForRoleSlug(user.role);
-  if (!permissions.length && DEFAULT_ROLE_PERMISSIONS[user.role]) {
-    permissions = DEFAULT_ROLE_PERMISSIONS[user.role].map((g) => ({
-      key: g.key,
-      scope: g.scope,
-    }));
-  }
-  return permissions;
+  return getPermissionsForRoleSlug(user.role);
 };
 
 const toAuthUserPayload = async (user) => {
@@ -710,18 +702,18 @@ export const refreshToken = asyncHandler(async (req, res) => {
     throw new AppError('Invalid refresh token', 401);
   }
 
-  const jtiValid = await isRefreshTokenValid(decoded.jti);
-  // Allow recovery when Redis was wiped (e.g. local in-memory Redis restart)
-  // but the refresh JWT cookie is still within expiry.
-  if (jtiValid) {
-    await revokeRefreshToken(decoded.jti);
-  }
-
   const user = await User.findById(decoded.userId).populate('department');
   if (!user?.isActive) throw new AppError('User inactive', 401);
+  if (user.isLocked) throw new AppError('Account is locked', 403, 'ACCOUNT_LOCKED');
 
   // Keep the same device session (sliding expiry) instead of forcing a new login identity.
   const existingSession = decoded.sessionId ? await getSession(decoded.sessionId) : null;
+  if (!existingSession || String(existingSession.userId) !== String(decoded.userId)) {
+    throw new AppError('Session expired', 401, 'SESSION_EXPIRED');
+  }
+  if (!await consumeRefreshToken(decoded.jti, decoded.userId)) {
+    throw new AppError('Refresh token revoked or already used', 401, 'INVALID_TOKEN');
+  }
 
   const tokens = await createAuthTokens(user, req, {
     sessionId: existingSession ? decoded.sessionId : undefined,

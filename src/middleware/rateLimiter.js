@@ -52,3 +52,13 @@ export const otpRateLimiter = rateLimit({
   store: redisStore('rl:otp:'),
   message: { success: false, message: 'OTP request limit exceeded' },
 });
+
+export const expensiveRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: redisStore('rl:expensive:'),
+  keyGenerator: (req) => String(req.user._id),
+  message: { success: false, message: 'Too many export or report requests. Try again shortly.' },
+});

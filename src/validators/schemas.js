@@ -233,6 +233,10 @@ export const followUpDiscussionSchema = z.object({
   }),
 });
 
+export const completeFollowUpSchema = z.object({
+  body: z.object({ notes: z.string().trim().max(5000).optional() }),
+});
+
 export const createFollowUpSchema = z.object({
   body: z.object({
     lead: z.string(),
@@ -255,8 +259,8 @@ export const scheduleLeadFollowUpSchema = z.object({
 
 export const paginationSchema = z.object({
   query: z.object({
-    page: z.string().optional(),
-    limit: z.string().optional(),
+    page: z.string().regex(/^[1-9]\d*$/).refine((v) => Number(v) <= 100000).optional(),
+    limit: z.string().regex(/^[1-9]\d*$/).refine((v) => Number(v) <= 500).optional(),
     search: z.string().optional(),
     sortBy: z.string().optional(),
     sortOrder: z.enum(['asc', 'desc']).optional(),
@@ -270,7 +274,7 @@ export const paginationSchema = z.object({
     source: z.string().optional(),
     course: z.string().optional(),
     connectorId: z.string().optional(),
-  }),
+  }).passthrough(),
 });
 
 export const reportSchema = z.object({

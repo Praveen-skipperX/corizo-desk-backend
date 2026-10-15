@@ -6,7 +6,7 @@ export const notFound = (req, res, next) => {
 };
 
 export const errorHandler = (err, req, res, _next) => {
-  let statusCode = err.statusCode || 500;
+  let statusCode = err.statusCode || err.status || 500;
   let message = err.message || 'Internal Server Error';
   let code = err.code || 'INTERNAL_ERROR';
 
@@ -29,14 +29,17 @@ export const errorHandler = (err, req, res, _next) => {
   }
 
   if (statusCode >= 500) {
-    logger.error('Server error:', { error: err.message, stack: err.stack, url: req.originalUrl });
+    logger.error('Server error:', { error: err.message, stack: err.stack, path: req.path, requestId: req.requestId });
+    message = 'Internal Server Error';
+    code = 'INTERNAL_ERROR';
   }
 
   res.status(statusCode).json({
     success: false,
     message,
     code,
-    ...(err.meta && { meta: err.meta }),
+    ...(statusCode < 500 && err.meta && { meta: err.meta }),
+    requestId: req.requestId,
     ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),
   });
 };

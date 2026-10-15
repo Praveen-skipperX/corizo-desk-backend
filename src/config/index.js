@@ -22,12 +22,12 @@ const config = {
   frontendOrigins: [
     ...new Set(
       [
-        ...(process.env.FRONTEND_URLS || process.env.FRONTEND_URL || 'http://localhost:5173')
+        ...(process.env.FRONTEND_URLS || process.env.FRONTEND_URL || (process.env.NODE_ENV === 'production' ? 'https://desk.corizo.in' : 'http://localhost:5173'))
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean),
         'https://desk.corizo.in',
-        'http://localhost:5173',
+        ...(process.env.NODE_ENV !== 'production' ? ['http://localhost:5173'] : []),
       ]
     ),
   ],

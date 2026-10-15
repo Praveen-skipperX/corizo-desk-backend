@@ -1,3 +1,5 @@
+import { csvCell } from '../utils/inputSecurity.js';
+import { AppError } from '../utils/apiResponse.js';
 import { asyncHandler } from '../utils/apiResponse.js';
 import { Lead, FollowUp, DealClosure, ActivityLog, User } from '../models/index.js';
 import { buildLeadScopeFilter } from '../utils/leadAccess.js';
@@ -30,17 +32,17 @@ const getReportData = async (type, filters, user) => {
       return Lead.find({ isDeleted: false, ...scopeFilter, ...dateFilter })
         .populate('department assignedTo createdBy', 'name email')
         .sort({ createdAt: -1 })
-        .lean();
+        .limit(5001).maxTimeMS(15000).lean();
     case 'follow_up':
       return FollowUp.find({ ...scopeFilter, ...buildDateFilter(filters.dateFrom, filters.dateTo, 'scheduledDate') })
         .populate('lead assignedTo', 'leadId name email')
         .sort({ scheduledDate: -1 })
-        .lean();
+        .limit(5001).maxTimeMS(15000).lean();
     case 'revenue':
       return DealClosure.find({ status: 'active', ...scopeFilter, ...buildDateFilter(filters.dateFrom, filters.dateTo, 'closureDate') })
         .populate('department closedBy', 'name email')
         .sort({ closureDate: -1 })
-        .lean();
+        .limit(5001).maxTimeMS(15000).lean();
     case 'employee':
     case 'counselor':
       return User.find({
@@ -49,14 +51,15 @@ const getReportData = async (type, filters, user) => {
         ...scopeFilter.department ? { department: scopeFilter.department } : {},
       })
         .populate('department', 'name')
-        .lean();
-    case 'audit':
+        .limit(5001).maxTimeMS(15000).lean();
+    case 'audit': {
       const actFilter = user.role === ROLES.SUPER_ADMIN ? {} : user.role === ROLES.ADMIN ? { department: user.department._id || user.department } : { user: user._id };
       return ActivityLog.find({ ...actFilter, ...dateFilter })
         .populate('user department', 'name email')
         .sort({ createdAt: -1 })
         .limit(5000)
-        .lean();
+        .limit(5001).maxTimeMS(15000).lean();
+    }
     default:
       return [];
   }
@@ -127,12 +130,12 @@ const exportCsv = (res, data, type, filename) => {
   if (type === 'lead' && data.length) {
     csv = 'Lead ID,Name,Email,Phone,Status,Priority,Department,Assigned To,Created At\n';
     data.forEach((row) => {
-      csv += `"${row.leadId}","${row.name}","${row.email || ''}","${row.phone}","${row.status}","${row.priority}","${row.department?.name || ''}","${row.assignedTo?.name || ''}","${row.createdAt}"\n`;
+      csv += [row.leadId, row.name, row.email, row.phone, row.status, row.priority, row.department?.name, row.assignedTo?.name, row.createdAt].map(csvCell).join(',') + '\n';
     });
   } else if (type === 'revenue' && data.length) {
     csv = 'Lead Ref,Name,Amount,Department,Closed By,Closure Date\n';
     data.forEach((row) => {
-      csv += `"${row.leadRef}","${row.name}","${row.amount}","${row.department?.name || ''}","${row.closedBy?.name || ''}","${row.closureDate}"\n`;
+      csv += [row.leadRef, row.name, row.amount, row.department?.name, row.closedBy?.name, row.closureDate].map(csvCell).join(',') + '\n';
     });
   }
 
@@ -172,6 +175,7 @@ const exportPdf = (res, data, type, filename) => {
 export const generateReport = asyncHandler(async (req, res) => {
   const { type, format = 'excel', ...filters } = req.query;
   const data = await getReportData(type, filters, req.user);
+  if (data.length > 5000) throw new AppError('Report exceeds 5000 records. Narrow the date range.', 422, 'EXPORT_TOO_LARGE');
   const filename = `${type}-report-${Date.now()}`;
 
   switch (format) {

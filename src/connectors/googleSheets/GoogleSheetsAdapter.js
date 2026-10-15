@@ -59,7 +59,7 @@ export default class GoogleSheetsAdapter extends ConnectorAdapter {
       throw err;
     }
     await auth.authorize();
-    return google.sheets({ version: 'v4', auth });
+    return google.sheets({ version: 'v4', auth, timeout: 15000, retry: true, retryConfig: { retry: 2 } });
   }
 
   async testConnection(connector) {
@@ -122,9 +122,10 @@ export default class GoogleSheetsAdapter extends ConnectorAdapter {
     const worksheet = connector.config.worksheetName;
     const headerRow = connector.headerRow || 1;
 
+    const escapedWorksheet = String(worksheet).replace(/'/g, "''");
     const range = options.headerOnly
-      ? `'${worksheet}'!${headerRow}:${headerRow}`
-      : `'${worksheet}'`;
+      ? `'${escapedWorksheet}'!${headerRow}:${headerRow}`
+      : `'${escapedWorksheet}'!A${headerRow}:ZZ`;
 
     const result = await sheets.spreadsheets.values.get({
       spreadsheetId,

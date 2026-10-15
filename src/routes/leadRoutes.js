@@ -89,11 +89,11 @@ router.use(authenticate, employeeScope);
 router.get('/follow-ups/dashboard', getFollowUpDashboard);
 router.get('/import/template', getImportTemplate);
 router.get('/import/history', getImportHistory);
-router.post('/import', authorize(ROLES.SUPER_ADMIN, ROLES.ADMIN), upload.single('file'), importLeads);
+router.post('/import', authorize(ROLES.SUPER_ADMIN, ROLES.ADMIN), requirePermission('leads.import'), upload.single('file'), importLeads);
 
 router.route('/')
-  .get(validate(paginationSchema), listLeads)
-  .post(validate(createLeadSchema), createLead);
+  .get(requirePermission('leads.view'), validate(paginationSchema), listLeads)
+  .post(requirePermission('leads.create'), validate(createLeadSchema), createLead);
 
 router.post(
   '/bulk-delete',
@@ -109,14 +109,14 @@ router.post(
 );
 
 router.route('/:id')
-  .get(getLead)
-  .patch(validate(updateLeadSchema), updateLead)
+  .get(requirePermission('leads.view'), getLead)
+  .patch(requirePermission('leads.edit'), validate(updateLeadSchema), updateLead)
   .delete(authorize(ROLES.SUPER_ADMIN, ROLES.ADMIN), requirePermission('leads.delete'), softDeleteLead);
 
-router.post('/:id/assign', validate(assignLeadSchema), assignLead);
+router.post('/:id/assign', requirePermission('leads.assign'), validate(assignLeadSchema), assignLead);
 router.post('/:id/communication', trackCommunication);
 router.post('/:id/next-follow-up', validate(scheduleLeadFollowUpSchema), scheduleLeadFollowUp);
-router.post('/:id/transfer', validate(transferLeadSchema), requestTransfer);
+router.post('/:id/transfer', requirePermission('leads.transfer'), validate(transferLeadSchema), requestTransfer);
 router.post('/:id/creator-remarks', validate(createRemarkSchema), addCreatorRemark);
 router.patch('/:id/creator-remarks/:remarkId', validate(createRemarkSchema), updateCreatorRemark);
 router.post('/:id/admin-remarks', authorize(ROLES.SUPER_ADMIN, ROLES.ADMIN), validate(createRemarkSchema), addAdminRemark);

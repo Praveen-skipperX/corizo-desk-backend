@@ -1,6 +1,9 @@
 import { getClientIp, getDeviceInfo } from '../utils/helpers.js';
+import { randomUUID } from 'node:crypto';
 
 export const requestContext = (req, res, next) => {
+  req.requestId = randomUUID();
+  res.set('X-Request-ID', req.requestId);
   req.clientIp = getClientIp(req);
   req.deviceInfo = getDeviceInfo(req);
   next();

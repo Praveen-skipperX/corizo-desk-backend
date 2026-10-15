@@ -1,0 +1,9 @@
+{
+  "entryBytes": 315549,
+  "entryGzipBytes": 99252,
+  "initialStaticJsBytes": 315549,
+  "initialStaticJsGzipBytes": 99252,
+  "staticChunks": [
+    "index-ClLgcTrA.js"
+  ]
+}

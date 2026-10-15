@@ -140,6 +140,13 @@ leadSchema.index({ department: 1, status: 1 });
 leadSchema.index({ department: 1, assignedTo: 1 });
 leadSchema.index({ department: 1, priority: 1, nextFollowUpDate: 1 });
 leadSchema.index({ createdAt: -1 });
+// Scoped pagination and follow-up windows; provision explicitly before release.
+leadSchema.index({ isDeleted: 1, createdAt: -1, _id: -1 });
+leadSchema.index({ department: 1, isDeleted: 1, createdAt: -1, _id: -1 });
+leadSchema.index({ assignedTo: 1, isDeleted: 1, createdAt: -1, _id: -1 });
+leadSchema.index({ createdBy: 1, isDeleted: 1, createdAt: -1, _id: -1 });
+leadSchema.index({ 'importMeta.connectorId': 1, isDeleted: 1, createdAt: -1, _id: -1 });
+leadSchema.index({ department: 1, isDeleted: 1, nextFollowUpDate: 1 });
 leadSchema.index({ name: 'text', email: 'text', phone: 'text' });
 
 const Lead = mongoose.model('Lead', leadSchema);

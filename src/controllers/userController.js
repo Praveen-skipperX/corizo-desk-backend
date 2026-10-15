@@ -343,7 +343,7 @@ export const updateUser = asyncHandler(async (req, res) => {
     if (req.body[key] !== undefined) user[key] = req.body[key];
   }
 
-  const nextRole = req.body.role !== undefined ? req.body.role : user.role;
+  const nextRole = user.role;
   if (req.body.allowedConnectors !== undefined || req.body.role !== undefined) {
     if (nextRole === ROLES.EMPLOYEE) {
       user.allowedConnectors = await resolveAllowedConnectors(

@@ -1,27 +1,34 @@
+let connectionPromise;
+
 module.exports = async function handler(req, res) {
   try {
-    const origin = (req.headers && req.headers.origin) || '';
-    if (
-      origin === 'https://desk.corizo.in'
-      || origin.indexOf('http://localhost:') === 0
-      || origin.indexOf('http://127.0.0.1:') === 0
-      || origin.indexOf('.vercel.app') !== -1
-    ) {
+    const { default: config } = await import('../src/config/index.js');
+    const origin = req.headers?.origin;
+    res.setHeader('Cache-Control', 'private, no-store');
+    if (origin && config.frontendOrigins.includes(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.setHeader('Vary', 'Origin');
     }
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-
+    if (origin && !config.frontendOrigins.includes(origin)) {
+      res.statusCode = 403;
+      res.end(JSON.stringify({ success: false, message: 'Origin not allowed' }));
+      return;
+    }
+    if (process.env.VERCEL_ENV === 'preview' && process.env.PREVIEW_DATA_ISOLATED !== 'true') {
+      res.statusCode = 503;
+      res.end(JSON.stringify({ success: false, message: 'Preview database isolation must be confirmed' }));
+      return;
+    }
     if (req.method === 'OPTIONS') {
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
       res.statusCode = 204;
       res.end();
       return;
     }
 
     const mongoose = (await import('mongoose')).default;
-    const { default: config } = await import('../src/config/index.js');
     const { getRedisClient } = await import('../src/config/redis.js');
     const { default: logger } = await import('../src/utils/logger.js');
 
@@ -38,10 +45,13 @@ module.exports = async function handler(req, res) {
 
     if (mongoose.connection.readyState !== 1) {
       mongoose.set('strictQuery', true);
-      await mongoose.connect(config.mongodbUri, {
+      connectionPromise ||= mongoose.connect(config.mongodbUri, {
         maxPoolSize: 5,
+        autoIndex: config.env !== 'production',
         serverSelectionTimeoutMS: 10000,
-      });
+        socketTimeoutMS: 45000,
+      }).finally(() => { connectionPromise = null; });
+      await connectionPromise;
       logger.info('MongoDB connected (serverless)');
     }
 
@@ -72,17 +82,12 @@ module.exports = async function handler(req, res) {
     return app(req, res);
   } catch (err) {
     console.error('API handler failed:', err);
-    const origin = (req.headers && req.headers.origin) || '';
-    if (origin) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-    }
     res.statusCode = 500;
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({
       success: false,
       code: 'BOOTSTRAP_FAILED',
-      message: (err && err.message) || 'Server failed to start',
+      message: 'Service temporarily unavailable',
     }));
   }
 };

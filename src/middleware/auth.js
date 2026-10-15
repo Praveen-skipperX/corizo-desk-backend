@@ -16,12 +16,14 @@ export const authenticate = async (req, res, next) => {
     const decoded = verifyAccessToken(token);
 
     const session = await getSession(decoded.sessionId);
-    if (!session) {
+    if (!session || String(session.userId) !== String(decoded.userId)) {
       throw new AppError('Session expired', 401, 'SESSION_EXPIRED');
     }
 
     // Sliding session — keep this device trusted while the user is active
-    await touchSession(decoded.sessionId);
+    if (!await touchSession(decoded.sessionId)) {
+      throw new AppError('Session expired', 401, 'SESSION_EXPIRED');
+    }
 
     const user = await User.findById(decoded.userId)
       .populate('department', 'name code isActive')
@@ -33,6 +35,9 @@ export const authenticate = async (req, res, next) => {
 
     if (user.isLocked) {
       throw new AppError('Account is locked', 403, 'ACCOUNT_LOCKED');
+    }
+    if (user.role === ROLES.ADMIN && !user.department) {
+      throw new AppError('No department assigned', 403, 'NO_DEPARTMENT');
     }
 
     req.user = user;

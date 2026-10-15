@@ -102,15 +102,24 @@ export const completeFollowUp = asyncHandler(async (req, res) => {
     throw new AppError('Access denied', 403);
   }
 
-  followUp.status = FOLLOW_UP_STATUSES.COMPLETED;
-  followUp.completedAt = new Date();
-  followUp.completedBy = req.user._id;
-  followUp.completionNotes = req.body.notes;
-  await followUp.save();
+  const claimed = await FollowUp.findOneAndUpdate({
+    _id: followUp._id, status: { $ne: FOLLOW_UP_STATUSES.COMPLETED },
+  }, { $set: {
+    status: FOLLOW_UP_STATUSES.COMPLETED, completedAt: new Date(),
+    completedBy: req.user._id, completionNotes: req.body.notes,
+  } }, { new: true });
+  if (!claimed) return successResponse(res, followUp, 'Follow-up already completed');
+  followUp.status = claimed.status;
+  followUp.completedAt = claimed.completedAt;
+  followUp.completedBy = claimed.completedBy;
+  followUp.completionNotes = claimed.completionNotes;
 
   if (followUp.lead) {
-    followUp.lead.lastActivityAt = new Date();
-    await followUp.lead.save();
+    // Clear only this schedule; never erase a newer follow-up created concurrently.
+    await Lead.updateOne({ _id: followUp.lead._id }, [{ $set: {
+      lastActivityAt: '$$NOW',
+      nextFollowUpDate: { $cond: [{ $eq: ['$nextFollowUpDate', followUp.scheduledDate] }, null, '$nextFollowUpDate'] },
+    } }]);
     await invalidateLeadCache(followUp.lead._id.toString());
   }
   await invalidateAllDashboardCaches();
